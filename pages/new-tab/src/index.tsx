@@ -1,5 +1,5 @@
 import '@src/index.css';
-import NewTab from '@src/NewTab';
+import NewTab from '@src/Flashcard';
 import { createRoot } from 'react-dom/client';
 
 const init = () => {

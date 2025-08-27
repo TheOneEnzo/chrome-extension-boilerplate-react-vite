@@ -54,6 +54,11 @@ export default function Popup() {
     chrome.storage.local.set({ targetLang: lang });
   };
 
+  const openFlashcards = () => {
+    // Open the new-tab page which contains your flashcards
+    chrome.tabs.create({ url: chrome.runtime.getURL("new-tab/index.html") });
+  };
+
   const escapeHtml = (s: string) =>
     String(s).replace(/[&<>"']/g, (m) =>
       ({
@@ -114,14 +119,21 @@ export default function Popup() {
       <h1 style={{ fontSize: 16, margin: "6px 0 12px 0" }}>
         Saved translations
       </h1>
+      
       <button
-        onClick={() =>
-          chrome.tabs.create({ url: chrome.runtime.getURL("homepage.html") })
-        }
+        onClick={openFlashcards}
+        style={{
+          padding: "8px 16px",
+          backgroundColor: "#1a73e8",
+          color: "white",
+          border: "none",
+          borderRadius: "4px",
+          cursor: "pointer",
+          marginBottom: "10px"
+        }}
       >
         Open Flashcards
       </button>
-      <button onClick={clearAll}>Clear saved</button>
 
       <label
         style={{
@@ -186,6 +198,23 @@ export default function Popup() {
             })
         )}
       </div>
+
+      {items.length > 0 && (
+        <button
+          onClick={clearAll}
+          style={{
+            marginTop: 10,
+            color: "red",
+            border: "1px solid red",
+            background: "transparent",
+            cursor: "pointer",
+            padding: "4px 8px",
+            borderRadius: "4px"
+          }}
+        >
+          Clear All Translations
+        </button>
+      )}
     </div>
   );
 }
