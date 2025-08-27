@@ -1,63 +1,191 @@
-import '@src/Popup.css';
-import { t } from '@extension/i18n';
-import { PROJECT_URL_OBJECT, useStorage, withErrorBoundary, withSuspense } from '@extension/shared';
-import { exampleThemeStorage } from '@extension/storage';
-import { cn, ErrorDisplay, LoadingSpinner, ToggleButton } from '@extension/ui';
+import React, { useEffect, useState } from "react";
 
-const notificationOptions = {
-  type: 'basic',
-  iconUrl: chrome.runtime.getURL('icon-34.png'),
-  title: 'Injecting content script error',
-  message: 'You cannot inject script here!',
-} as const;
-
-const Popup = () => {
-  const { isLight } = useStorage(exampleThemeStorage);
-  const logo = isLight ? 'popup/logo_vertical.svg' : 'popup/logo_vertical_dark.svg';
-
-  const goGithubSite = () => chrome.tabs.create(PROJECT_URL_OBJECT);
-
-  const injectContentScript = async () => {
-    const [tab] = await chrome.tabs.query({ currentWindow: true, active: true });
-
-    if (tab.url!.startsWith('about:') || tab.url!.startsWith('chrome:')) {
-      chrome.notifications.create('inject-error', notificationOptions);
-    }
-
-    await chrome.scripting
-      .executeScript({
-        target: { tabId: tab.id! },
-        files: ['/content-runtime/example.iife.js', '/content-runtime/all.iife.js'],
-      })
-      .catch(err => {
-        // Handling errors related to other paths
-        if (err.message.includes('Cannot access a chrome:// URL')) {
-          chrome.notifications.create('inject-error', notificationOptions);
-        }
-      });
-  };
-
-  return (
-    <div className={cn('App', isLight ? 'bg-slate-50' : 'bg-gray-800')}>
-      <header className={cn('App-header', isLight ? 'text-gray-900' : 'text-gray-100')}>
-        <button onClick={goGithubSite}>
-          <img src={chrome.runtime.getURL(logo)} className="App-logo" alt="logo" />
-        </button>
-        <p>
-          Edit <code>pages/popup/src/Popup.tsx</code>
-        </p>
-        <button
-          className={cn(
-            'mt-4 rounded px-4 py-1 font-bold shadow hover:scale-105',
-            isLight ? 'bg-blue-200 text-black' : 'bg-gray-700 text-white',
-          )}
-          onClick={injectContentScript}>
-          {t('injectButton')}
-        </button>
-        <ToggleButton>{t('toggleTheme')}</ToggleButton>
-      </header>
-    </div>
-  );
+type TranslationItem = {
+  original: string;
+  translation: string;
+  date: string;
+  url?: string;
 };
 
-export default withErrorBoundary(withSuspense(Popup, <LoadingSpinner />), ErrorDisplay);
+export default function Popup() {
+  const [items, setItems] = useState<TranslationItem[]>([]);
+  const [enabled, setEnabled] = useState(true);
+  const [targetLang, setTargetLang] = useState("EN-US");
+
+  // Load translations on mount
+  useEffect(() => {
+    chrome.storage.local.get({ translations: [] }, (res) => {
+      setItems(res.translations as TranslationItem[]);
+    });
+
+    chrome.storage.local.get({ enabled: true }, (res) => {
+      setEnabled(res.enabled);
+    });
+
+    chrome.storage.local.get({ targetLang: "EN-US" }, (res) => {
+      setTargetLang(res.targetLang);
+    });
+  }, []);
+
+  const removeItem = (index: number) => {
+    chrome.storage.local.get({ translations: [] }, (res) => {
+      const list = res.translations as TranslationItem[];
+      const newList = list.filter((_, i) => i !== index);
+      chrome.storage.local.set({ translations: newList }, () => {
+        setItems(newList);
+      });
+    });
+  };
+
+  const clearAll = () => {
+    if (!confirm("Clear all saved translations?")) return;
+    chrome.storage.local.set({ translations: [] }, () => {
+      setItems([]);
+    });
+  };
+
+  const toggleExtension = (checked: boolean) => {
+    setEnabled(checked);
+    chrome.storage.local.set({ enabled: checked });
+  };
+
+  const changeTargetLang = (lang: string) => {
+    setTargetLang(lang);
+    chrome.storage.local.set({ targetLang: lang });
+  };
+
+  const escapeHtml = (s: string) =>
+    String(s).replace(/[&<>"']/g, (m) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[m] || m)
+    );
+
+  return (
+    <div style={{ fontFamily: "system-ui, Arial", margin: 8, width: 380 }}>
+      <label htmlFor="target-lang">Translate to:</label>
+      <select
+        id="target-lang"
+        value={targetLang}
+        onChange={(e) => changeTargetLang(e.target.value)}
+      >
+        <option value="AR">Arabic</option>
+        <option value="BG">Bulgarian</option>
+        <option value="ZH">Chinese (simplified)</option>
+        <option value="ZH-TW">Chinese (traditional)</option>
+        <option value="CS">Czech</option>
+        <option value="DA">Danish</option>
+        <option value="NL">Dutch</option>
+        <option value="EN-US">English (American)</option>
+        <option value="EN-GB">English (British)</option>
+        <option value="ET">Estonian</option>
+        <option value="FI">Finnish</option>
+        <option value="FR">French</option>
+        <option value="DE">German</option>
+        <option value="EL">Greek</option>
+        <option value="HE">Hebrew</option>
+        <option value="HU">Hungarian</option>
+        <option value="ID">Indonesian</option>
+        <option value="IT">Italian</option>
+        <option value="JA">Japanese</option>
+        <option value="KO">Korean</option>
+        <option value="LV">Latvian</option>
+        <option value="LT">Lithuanian</option>
+        <option value="NO">Norwegian (bokmål)</option>
+        <option value="PL">Polish</option>
+        <option value="PT">Portuguese</option>
+        <option value="PT-BR">Portuguese (Brazilian)</option>
+        <option value="RO">Romanian</option>
+        <option value="RU">Russian</option>
+        <option value="SK">Slovak</option>
+        <option value="SL">Slovenian</option>
+        <option value="ES">Spanish</option>
+        <option value="ES-XL">Spanish (Latin American)</option>
+        <option value="SV">Swedish</option>
+        <option value="TR">Turkish</option>
+        <option value="UK">Ukrainian</option>
+        <option value="VI">Vietnamese</option>
+      </select>
+
+      <h1 style={{ fontSize: 16, margin: "6px 0 12px 0" }}>
+        Saved translations
+      </h1>
+      <button
+        onClick={() =>
+          chrome.tabs.create({ url: chrome.runtime.getURL("homepage.html") })
+        }
+      >
+        Open Flashcards
+      </button>
+      <button onClick={clearAll}>Clear saved</button>
+
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginTop: 10,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => toggleExtension(e.target.checked)}
+        />
+        Enable extension
+      </label>
+
+      <div id="list" style={{ marginTop: 10 }}>
+        {items.length === 0 ? (
+          <div style={{ color: "#666" }}>
+            No saved translations yet. Highlight text on any page to save.
+          </div>
+        ) : (
+          items
+            .slice()
+            .reverse()
+            .map((it, idx) => {
+              const d = new Date(it.date);
+              return (
+                <div
+                  key={idx}
+                  style={{
+                    padding: 8,
+                    borderBottom: "1px solid #eee",
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    {escapeHtml(it.original)}
+                  </div>
+                  <div style={{ color: "#1a1a1a", marginTop: 4 }}>
+                    {escapeHtml(it.translation)}
+                  </div>
+                  <div
+                    style={{ fontSize: 11, color: "#666", marginTop: 6 }}
+                  >{`${d.toLocaleString()} ${
+                    it.url ? " — " + escapeHtml(it.url) : ""
+                  }`}</div>
+                  <button
+                    onClick={() => removeItem(items.length - 1 - idx)}
+                    style={{
+                      marginTop: 5,
+                      color: "red",
+                      border: "none",
+                      background: "transparent",
+                      cursor: "pointer",
+                    }}
+                  >
+                    ✖ Remove
+                  </button>
+                </div>
+              );
+            })
+        )}
+      </div>
+    </div>
+  );
+}
