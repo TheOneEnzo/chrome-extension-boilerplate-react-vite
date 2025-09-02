@@ -12,6 +12,7 @@ const cache: Record<string, string> = {};
 interface TranslationMessage {
   type: "translate";
   text: string;
+  url?: string; // Add URL to the message
 }
 
 interface TranslationResponse {
@@ -21,12 +22,12 @@ interface TranslationResponse {
 }
 
 // Helper: save to chrome.storage.local (keeps last 100)
-async function saveTranslation(original: string, translation: string): Promise<void> {
+async function saveTranslation(original: string, translation: string, url: string = ""): Promise<void> {
   return new Promise((resolve) => {
-    chrome.storage.local.get({ translations: [], _lastUrl: "" }, (result) => {
+    chrome.storage.local.get({ translations: [] }, (result) => {
       const updated = [
         ...result.translations,
-        { original, translation, date: Date.now(), url: result._lastUrl || "" },
+        { original, translation, date: Date.now(), url: url },
       ];
       // keep only latest 100 items
       const trimmed = updated.slice(-100);
@@ -52,10 +53,14 @@ chrome.runtime.onMessage.addListener(
         }
 
         const targetLang = (res.targetLang || DEFAULT_TARGET_LANG).toLowerCase();
+        // Get URL from the message, or try to get it from the sender tab
+        const pageUrl = message.url || (sender.tab?.url) || "";
 
         // Check cache
         const cacheKey = `${text}|${targetLang}`;
         if (cache[cacheKey]) {
+          // Still save to storage even if from cache, with the current URL
+          saveTranslation(text, cache[cacheKey], pageUrl);
           sendResponse({ translation: cache[cacheKey], fromCache: true });
           return;
         }
@@ -94,7 +99,7 @@ chrome.runtime.onMessage.addListener(
 
               // cache it
               cache[cacheKey] = safeTranslation;
-              await saveTranslation(text, safeTranslation);
+              await saveTranslation(text, safeTranslation, pageUrl);
 
               sendResponse({ translation: safeTranslation });
             } catch (err) {

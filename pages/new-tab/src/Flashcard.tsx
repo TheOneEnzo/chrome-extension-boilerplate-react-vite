@@ -27,6 +27,11 @@ const Flashcards = () => {
   // Extract domain from URL
   const getDomain = (url: string): string => {
     try {
+      // Handle empty or undefined URLs
+      if (!url || url.trim() === '') {
+        return 'Unknown Site';
+      }
+
       // Handle cases where URL might not have protocol
       let processedUrl = url;
       if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('file://')) {
@@ -38,12 +43,17 @@ const Flashcards = () => {
     } catch (error) {
       console.error('Error parsing URL:', url, error);
       // For extension pages, use a special identifier
-      if (url.includes('chrome-extension://')) {
+      if (url && url.includes('chrome-extension://')) {
         return 'Extension Pages';
       }
       // Try to extract domain using regex as fallback
-      const domainMatch = url.match(/(?:https?:\/\/)?(?:www\.)?([^\/:]+)/);
-      return domainMatch ? domainMatch[1] : 'Unknown Site';
+      if (url) {
+        const domainMatch = url.match(/(?:https?:\/\/)?(?:www\.)?([^\/:]+)/);
+        if (domainMatch && domainMatch[1]) {
+          return domainMatch[1];
+        }
+      }
+      return 'Unknown Site';
     }
   };
 
@@ -54,7 +64,16 @@ const Flashcards = () => {
     translations.forEach((translation, index) => {
       const translationWithId = { ...translation, id: translation.id || `translation-${index}` };
       const domain = translation.url ? getDomain(translation.url) : 'Unknown Site';
-      const siteUrl = translation.url ? (translation.url.startsWith('http') ? translation.url : `https://${translation.url}`) : '#';
+      
+      // Better URL handling
+      let siteUrl = '#';
+      if (translation.url && translation.url.trim() !== '') {
+        if (translation.url.startsWith('http://') || translation.url.startsWith('https://')) {
+          siteUrl = translation.url;
+        } else if (!translation.url.includes('chrome-extension://')) {
+          siteUrl = `https://${translation.url}`;
+        }
+      }
       
       if (!groups[domain]) {
         groups[domain] = {
@@ -139,6 +158,15 @@ const Flashcards = () => {
     setReviewMode(true);
     setReviewCards([...cards].sort(() => Math.random() - 0.5)); // Shuffle cards
     setReviewSite(siteDomain);
+    setCurrentCardIndex(0);
+    setShowTranslation(false);
+  };
+
+  // Close review mode
+  const closeReview = () => {
+    setReviewMode(false);
+    setReviewCards([]);
+    setReviewSite('');
     setCurrentCardIndex(0);
     setShowTranslation(false);
   };
@@ -265,9 +293,30 @@ const Flashcards = () => {
             borderRadius: '10px',
             maxWidth: '500px',
             width: '90%',
-            textAlign: 'center'
+            textAlign: 'center',
+            position: 'relative'
           }}>
-            <h3>Reviewing: {reviewSite}</h3>
+            {/* Close button */}
+            <button 
+              onClick={closeReview}
+              style={{
+                position: 'absolute',
+                top: '15px',
+                right: '15px',
+                background: 'none',
+                border: 'none',
+                fontSize: '24px',
+                cursor: 'pointer',
+                color: '#666',
+                lineHeight: '1',
+                padding: '5px'
+              }}
+              title="Close review"
+            >
+              ×
+            </button>
+
+            <h3 style={{ marginTop: '0' }}>Reviewing: {reviewSite}</h3>
             <p style={{color: '#666', marginBottom: '20px'}}>
               Card {currentCardIndex + 1} of {reviewCards.length}
             </p>
@@ -306,7 +355,7 @@ const Flashcards = () => {
               </button>
             </div>
             
-            <div>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '10px' }}>
               <button 
                 onClick={prevCard}
                 disabled={currentCardIndex === 0}
@@ -316,8 +365,7 @@ const Flashcards = () => {
                   color: 'white',
                   border: 'none',
                   borderRadius: '4px',
-                  cursor: currentCardIndex === 0 ? 'not-allowed' : 'pointer',
-                  marginRight: '10px'
+                  cursor: currentCardIndex === 0 ? 'not-allowed' : 'pointer'
                 }}
               >
                 Previous
@@ -336,22 +384,21 @@ const Flashcards = () => {
               >
                 {currentCardIndex === reviewCards.length - 1 ? 'Finish' : 'Next'}
               </button>
+
+              <button 
+                onClick={closeReview}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: '#dc3545',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer'
+                }}
+              >
+                Close Review
+              </button>
             </div>
-            
-            <button 
-              onClick={() => setReviewMode(false)}
-              style={{
-                position: 'absolute',
-                top: '10px',
-                right: '10px',
-                background: 'none',
-                border: 'none',
-                fontSize: '20px',
-                cursor: 'pointer'
-              }}
-            >
-              ×
-            </button>
           </div>
         </div>
       )}
@@ -492,7 +539,7 @@ const Flashcards = () => {
                         gap: "8px",
                         padding: "8px 12px",
                         backgroundColor: siteGroup.url === '#' ? "#e9ecef" : "#0d6efd",
-                        color: "white",
+                        color: siteGroup.url === '#' ? "#6c757d" : "white",
                         border: "none",
                         borderRadius: "4px",
                         cursor: siteGroup.url === '#' ? "not-allowed" : "pointer",

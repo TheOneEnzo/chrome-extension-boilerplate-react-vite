@@ -60,9 +60,13 @@ document.addEventListener("mouseup", (ev: MouseEvent) => {
     rect = { top: ev.clientY, left: ev.clientX };
   }
 
-  // send to background to translate
+  // send to background to translate, including the current page URL
   chrome.runtime.sendMessage(
-    { type: "translate", text: selectedText },
+    { 
+      type: "translate", 
+      text: selectedText,
+      url: window.location.href // Include the current page URL
+    },
     (response?: { translation?: string }) => {
       if (!response || !response.translation) return; // nothing to show
       showTooltip(response.translation, rect);
