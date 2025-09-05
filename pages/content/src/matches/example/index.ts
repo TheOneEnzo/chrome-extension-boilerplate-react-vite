@@ -31,7 +31,7 @@ function showTooltip(text: string, rect: DOMRect | { top: number; left: number }
   setTimeout(() => {
     if (tooltip) tooltip.remove();
     tooltip = null;
-  }, 5000);
+  }, 7000);
 }
 
 document.addEventListener("mousedown", () => {
