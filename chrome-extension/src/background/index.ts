@@ -1,8 +1,13 @@
 // background.ts
 // Background service worker for translations + caching + saving
 // Using DeepL API for real translations
+import env from '@extension/env';
 
-const API_KEY: string = "5e06bd79-13c1-415e-905e-e61dadde48fb:fx"; // <-- Your DeepL API key
+const API_KEY: string = process.env.CEB_API_KEY || '';
+
+// Debug log to verify it's working
+console.log('CEB_API_KEY from process.env:', process.env.CEB_API_KEY);
+console.log('CEB_API_KEY length:', process.env.CEB_API_KEY?.length);
 const DEFAULT_TARGET_LANG = "en"; // default target language
 
 // Simple in-memory cache
@@ -66,47 +71,62 @@ chrome.runtime.onMessage.addListener(
         }
 
         (async () => {
-            try {
-              let translation: string | null = null;
+          try {
+            let translation: string | null = null;
 
-              if (API_KEY) {
-                const url = "https://api-free.deepl.com/v2/translate";
-                const params = new URLSearchParams();
-                params.append("auth_key", API_KEY);
-                params.append("text", text);
-                params.append("target_lang", targetLang.toUpperCase());
+            // Check if API key is present and valid
+            if (API_KEY && API_KEY.trim() !== '' && API_KEY !== 'undefined') {
+              console.log('Using real DeepL API for translation');
+              
+              // Use the correct DeepL API endpoint format
+              const url = "https://api-free.deepl.com/v2/translate";
+              const params = new URLSearchParams();
+              params.append("auth_key", API_KEY.trim());
+              params.append("text", text);
+              params.append("target_lang", targetLang.toUpperCase());
 
-                const resp = await fetch(url, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                  body: params.toString(),
-                });
+              const resp = await fetch(url, {
+                method: "POST",
+                headers: { 
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  "User-Agent": "YourApp/1.2.3" // Some APIs like this
+                },
+                body: params.toString(),
+              });
 
-                if (!resp.ok) throw new Error(`DeepL API error: ${resp.status}`);
-
-                const data = await resp.json();
-                if (data.translations && data.translations.length > 0) {
-                  translation = data.translations[0].text;
-                } else {
-                  translation = "[translation error]";
-                }
-              } else {
-                translation = "[mock] " + text;
+              if (!resp.ok) {
+                const errorText = await resp.text();
+                console.error('DeepL API error:', resp.status, errorText);
+                throw new Error(`DeepL API error: ${resp.status} - ${errorText}`);
               }
 
-              // ✅ Ensure translation is a string before using it
-              const safeTranslation: string = translation ?? "[null translation]";
-
-              // cache it
-              cache[cacheKey] = safeTranslation;
-              await saveTranslation(text, safeTranslation, pageUrl);
-
-              sendResponse({ translation: safeTranslation });
-            } catch (err) {
-              console.error("Translation error", err);
-              sendResponse({ translation: "[error]" });
+              const data = await resp.json();
+              if (data.translations && data.translations.length > 0) {
+                translation = data.translations[0].text;
+                console.log('Translation successful:', translation);
+              } else {
+                translation = "[translation error: no translations in response]";
+              }
+            } else {
+              console.log('Using mock translation - no valid API key found');
+              translation = "[mock] " + text;
             }
-          })();
+
+            // ✅ Ensure translation is a string before using it
+            const safeTranslation: string = translation ?? "[null translation]";
+
+            // cache it
+            cache[cacheKey] = safeTranslation;
+            await saveTranslation(text, safeTranslation, pageUrl);
+
+            sendResponse({ translation: safeTranslation });
+          } catch (err) {
+            console.error("Translation error", err);
+            sendResponse({ 
+              translation: "[error: " + (err instanceof Error ? err.message : String(err)) + "]" 
+            });
+          }
+        })();
 
       });
 

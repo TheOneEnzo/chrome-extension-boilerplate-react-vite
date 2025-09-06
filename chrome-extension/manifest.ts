@@ -6,9 +6,9 @@ const packageJson = JSON.parse(readFileSync('./package.json', 'utf8'));
 const manifest = {
   manifest_version: 3,
   default_locale: 'en',
-  name: 'Highlight Translator (MVP)',
+  name: 'Highlight Translator',
   version: '1.0',
-  description: 'Highlight any text to translate instantly and save for flashcards (MVP).',
+  description: 'Highlight any text to translate instantly and save for flashcards.',
   permissions: ['storage', 'activeTab', 'scripting'],
   background: {
     service_worker: 'background.js',
