@@ -1,7 +1,4 @@
-import { readFileSync } from 'node:fs';
 import type { ManifestType } from '@extension/shared';
-
-const packageJson = JSON.parse(readFileSync('./package.json', 'utf8'));
 
 const manifest = {
   manifest_version: 3,
@@ -9,7 +6,7 @@ const manifest = {
   name: 'Highlight Translator',
   version: '1.0',
   description: 'Highlight any text to translate instantly and save for flashcards.',
-  permissions: ['storage', 'activeTab', 'scripting'],
+  permissions: ['storage'],
   background: {
     service_worker: 'background.js',
     type: 'module',
@@ -18,16 +15,16 @@ const manifest = {
     {
       matches: ['<all_urls>'],
       js: ['content/example.iife.js'],
-      css: ['tooltip.css']
-    }
+      css: ['tooltip.css'],
+    },
   ],
   action: {
     default_popup: 'popup/index.html',
-    default_icon: 'icon.png'
+    default_icon: 'icon.png',
   },
   options_page: 'new-tab/index.html',
   icons: {
-    '48': 'icon.png'
+    '48': 'icon.png',
   },
   web_accessible_resources: [
     {
