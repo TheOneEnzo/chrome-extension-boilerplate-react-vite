@@ -1,6 +1,6 @@
-// background.ts
 // Background service worker for translations + caching + saving + authentication
 import { createClient } from '@supabase/supabase-js';
+import { sync } from 'fast-glob';
 
 const API_KEY: string = process.env.CEB_API_KEY || '';
 const SUPABASE_KEY: string = process.env.CEB_SUPABASE_KEY || '';
@@ -26,9 +26,10 @@ interface TranslationMessage {
 
 interface AuthMessage {
   type: 'auth';
-  action: 'signin' | 'signout' | 'getSession';
+  action: 'signin' | 'signout' | 'getSession' | 'refreshSession';
   email?: string;
   password?: string;
+  remember?: boolean;
 }
 
 interface TranslationResponse {
@@ -44,17 +45,49 @@ interface AuthResponse {
   session?: any;
 }
 
-// Get current user session
+// Store session data in chrome.storage for persistence
+async function storeSessionData(session: any) {
+  if (session) {
+    await chrome.storage.local.set({
+      supabaseSession: {
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+        expires_at: session.expires_at,
+        user: session.user
+      }
+    });
+  }
+}
+
+// Retrieve session data from chrome.storage
+async function getStoredSessionData() {
+  const result = await chrome.storage.local.get('supabaseSession');
+  return result.supabaseSession || null;
+}
+
+// Clear session data from chrome.storage
+async function clearStoredSessionData() {
+  await chrome.storage.local.remove(['supabaseSession', 'rememberMe']);
+}
+
+// Get current user session with proper error handling
 async function getCurrentSession() {
-  const {
-    data: { session },
-    error,
-  } = await supabase.auth.getSession();
-  if (error) {
-    console.error('Session error:', error);
+  try {
+    const {
+      data: { session },
+      error,
+    } = await supabase.auth.getSession();
+    
+    if (error) {
+      console.error('Session error:', error);
+      return null;
+    }
+    
+    return session;
+  } catch (error) {
+    console.error('Error in getCurrentSession:', error);
     return null;
   }
-  return session;
 }
 
 // Get current user ID
@@ -63,6 +96,213 @@ async function getCurrentUserId(): Promise<string | null> {
   return session?.user?.id || null;
 }
 
+// Check if session is expired
+function isSessionExpired(session: any): boolean {
+  if (!session || !session.expires_at) return true;
+  const now = Math.floor(Date.now() / 1000);
+  return now >= session.expires_at;
+}
+
+// Restore session from storage and refresh if needed
+async function restoreSession(): Promise<boolean> {
+  try {
+    const { rememberMe } = await chrome.storage.local.get('rememberMe');
+    
+    if (!rememberMe) {
+      return false;
+    }
+
+    const storedSession = await getStoredSessionData();
+    
+    if (!storedSession) {
+      console.log('No stored session found');
+      return false;
+    }
+
+    // Check if session is expired
+    if (isSessionExpired(storedSession)) {
+      console.log('Stored session expired, attempting refresh...');
+      
+      // Set the expired session first
+      const { error: setSessionError } = await supabase.auth.setSession({
+        access_token: storedSession.access_token,
+        refresh_token: storedSession.refresh_token
+      });
+      
+      if (setSessionError) {
+        console.error('Error setting expired session:', setSessionError);
+        await clearStoredSessionData();
+        return false;
+      }
+
+      // Now try to refresh
+      const { data, error: refreshError } = await supabase.auth.refreshSession();
+      
+      if (refreshError) {
+        console.error('Error refreshing session:', refreshError);
+        await clearStoredSessionData();
+        return false;
+      }
+
+      if (data.session) {
+        console.log('Session refreshed successfully');
+        await storeSessionData(data.session);
+        await syncBothDirections();
+        return true;
+      }
+    } else {
+      // Session is still valid, set it
+      console.log('Restoring valid session from storage');
+      const { error } = await supabase.auth.setSession({
+        access_token: storedSession.access_token,
+        refresh_token: storedSession.refresh_token
+      });
+      
+      if (error) {
+        console.error('Error restoring session:', error);
+        await clearStoredSessionData();
+        return false;
+      }
+      
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error('Error in restoreSession:', error);
+    return false;
+  }
+}
+
+// Refresh session periodically
+async function refreshSessionIfNeeded() {
+  try {
+    const { rememberMe } = await chrome.storage.local.get('rememberMe');
+    
+    if (!rememberMe) {
+      return;
+    }
+
+    const session = await getCurrentSession();
+    
+    if (!session) {
+      console.log('No active session to refresh');
+      return;
+    }
+
+    // Check if session will expire soon (within 5 minutes)
+    const now = Math.floor(Date.now() / 1000);
+    const expiresSoon = session.expires_at - now < 300; // 5 minutes
+    
+    if (expiresSoon) {
+      console.log('Session expires soon, refreshing...');
+      const { data, error } = await supabase.auth.refreshSession();
+      
+      if (error) {
+        console.error('Error refreshing session:', error);
+        // Don't clear rememberMe immediately, try to restore on next operation
+      } else if (data.session) {
+        console.log('Session refreshed successfully');
+        await storeSessionData(data.session);
+      }
+    }
+  } catch (error) {
+    console.error('Error in refreshSessionIfNeeded:', error);
+  }
+}
+async function saveToLocal(original: string, translation: string, url: string = ''): Promise<void> {
+  return new Promise(resolve => {
+    chrome.storage.local.get({ translations: [] }, result => {
+      const updated = [...result.translations, { original, translation, date: Date.now(), url }];
+      const trimmed = updated.slice(-500); // keep last 500
+      chrome.storage.local.set({ translations: trimmed }, () => resolve());
+    });
+  });
+}
+
+
+// Ensure user is authenticated before operations
+async function ensureAuthenticated(): Promise<boolean> {
+  const { rememberMe } = await chrome.storage.local.get('rememberMe');
+  
+  if (!rememberMe) {
+    return false;
+  }
+
+  // First try to get current session
+  let session = await getCurrentSession();
+  
+  if (session && !isSessionExpired(session)) {
+    return true;
+  }
+
+  // If no valid session, try to restore from storage
+  return await restoreSession();
+}
+
+async function syncSupabaseToLocal() {
+  try {
+    const isAuthenticated = await ensureAuthenticated();
+    if (!isAuthenticated) return;
+
+    const userId = await getCurrentUserId();
+    if (!userId) return;
+
+    const { data, error } = await supabase
+      .from('flashcards')
+      .select('original,translation,url,date')
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('syncSupabaseToLocal error:', error);
+      return;
+    }
+
+    if (data) {
+      await chrome.storage.local.set({ translations: data });
+      console.log('Supabase → Local sync complete');
+    }
+  } catch (err) {
+    console.error('syncSupabaseToLocal exception:', err);
+  }
+}
+
+// Main bidirectional sync: push local first, then pull supabase
+async function syncBothDirections() {
+  await syncLocalToSupabase();
+  await syncSupabaseToLocal();
+}
+
+async function syncLocalToSupabase() {
+  try {
+    const isAuthenticated = await ensureAuthenticated();
+    if (!isAuthenticated) return;
+
+    const userId = await getCurrentUserId();
+    if (!userId) return;
+
+    const { translations } = await chrome.storage.local.get('translations');
+    if (!translations || translations.length === 0) return;
+
+    const { error } = await supabase
+      .from('flashcards')
+      .insert(
+        translations.map((t: any) => ({
+          user_id: userId,
+          original: t.original,
+          translation: t.translation,
+          url: t.url || '',
+          date: new Date(t.date).toISOString(),
+        })));
+
+    if (error) console.error('syncLocalToSupabase error:', error);
+    else console.log('Local → Supabase sync complete');
+  } catch (err) {
+    console.error('syncLocalToSupabase exception:', err);
+  }
+}
+
+
 // Helper: save to Supabase flashcards table with real user ID
 async function saveTranslation(
   original: string,
@@ -70,44 +310,52 @@ async function saveTranslation(
   url: string = '',
   targetLang: string,
 ): Promise<void> {
+  // Always save to local
+  await saveToLocal(original, translation, url);
+
   try {
+    const isAuthenticated = await ensureAuthenticated();
+    if (!isAuthenticated) return;
+
     const userId = await getCurrentUserId();
+    if (!userId) return;
 
-    if (!userId) {
-      console.log('User not authenticated, skipping Supabase save');
-      fallbackSaveToChromeStorage(original, translation, url);
-      return;
-    }
-
-    const { data, error } = await supabase.from('flashcards').insert([
-      {
-        user_id: userId,
-        original: original,
-        translation: translation,
-        url: url,
-        date: new Date().toISOString(),
-      },
-    ]);
+    // Insert with insert on (user_id, original)
+    const { error } = await supabase
+      .from('flashcards')
+      .insert(
+        {
+          user_id: userId,
+          original,
+          translation,
+          url,
+          date: new Date().toISOString(),
+        });
 
     if (error) {
       console.error('Supabase insert error:', error);
-      fallbackSaveToChromeStorage(original, translation, url);
     } else {
-      console.log('Saved to Supabase flashcards successfully for user:', userId);
+      console.log('Saved translation to Supabase');
     }
   } catch (err) {
-    console.error('Supabase error:', err);
-    fallbackSaveToChromeStorage(original, translation, url);
+    console.error('saveTranslation error:', err);
   }
 }
 
 // Helper: check Supabase flashcards table for existing translation
 async function checkSupabaseCache(text: string, targetLang: string): Promise<string | null> {
   try {
+    const isAuthenticated = await ensureAuthenticated();
+
+    if (!isAuthenticated) {
+      console.log('User not authenticated, skipping Supabase cache check');
+      return null;
+    }
+
     const userId = await getCurrentUserId();
 
     if (!userId) {
-      console.log('User not authenticated, skipping Supabase cache check');
+      console.log('No user ID after authentication check, skipping cache');
       return null;
     }
 
@@ -144,7 +392,7 @@ async function fallbackSaveToChromeStorage(original: string, translation: string
 }
 
 // Authentication handlers
-async function handleSignIn(email: string, password: string): Promise<AuthResponse> {
+async function handleSignIn(email: string, password: string, remember: boolean = false): Promise<AuthResponse> {
   try {
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
@@ -153,11 +401,23 @@ async function handleSignIn(email: string, password: string): Promise<AuthRespon
 
     if (error) throw error;
 
+    // Store session data for persistence
+    if (remember && data.session) {
+      await chrome.storage.local.set({ 
+        rememberMe: true,
+        userEmail: email
+      });
+      await storeSessionData(data.session);
+      await syncBothDirections(); 
+    } else {
+      await clearStoredSessionData();
+    }
+
     return { success: true, user: data.user, session: data.session };
   } catch (error) {
     console.error('Sign in error:', error);
+    await clearStoredSessionData();
 
-    // Proper error handling
     if (error instanceof Error) {
       return { success: false, error: error.message };
     } else {
@@ -171,11 +431,11 @@ async function handleSignOut(): Promise<AuthResponse> {
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
 
+    await clearStoredSessionData();
     return { success: true };
   } catch (error) {
     console.error('Sign out error:', error);
 
-    // Proper error handling
     if (error instanceof Error) {
       return { success: false, error: error.message };
     } else {
@@ -186,19 +446,49 @@ async function handleSignOut(): Promise<AuthResponse> {
 
 async function handleGetSession(): Promise<AuthResponse> {
   try {
-    const session = await getCurrentSession();
-    return { success: true, session, user: session?.user };
+    const { rememberMe } = await chrome.storage.local.get('rememberMe');
+    
+    if (!rememberMe) {
+      return { success: false, error: 'Remember me not enabled' };
+    }
+
+    // Try to restore session first
+    const sessionRestored = await restoreSession();
+    
+    if (sessionRestored) {
+      const session = await getCurrentSession();
+      return { success: true, session, user: session?.user };
+    }
+    
+    return { success: false, error: 'Could not restore session' };
   } catch (error) {
     console.error('Get session error:', error);
-
-    // Proper error handling
-    if (error instanceof Error) {
-      return { success: false, error: error.message };
-    } else {
-      return { success: false, error: 'Unknown session error' };
-    }
+    return { success: false, error: 'Unknown session error' };
   }
 }
+
+async function handleRefreshSession(): Promise<AuthResponse> {
+  try {
+    const { data, error } = await supabase.auth.refreshSession();
+    
+    if (error) {
+      console.error('Refresh session error:', error);
+      await clearStoredSessionData();
+      return { success: false, error: error.message };
+    }
+
+    if (data.session) {
+      await storeSessionData(data.session);
+      return { success: true, session: data.session, user: data.user };
+    }
+
+    return { success: false, error: 'No session after refresh' };
+  } catch (error) {
+    console.error('Refresh session error:', error);
+    return { success: false, error: 'Unknown refresh error' };
+  }
+}
+
 // Main message listener
 chrome.runtime.onMessage.addListener(
   (message: TranslationMessage | AuthMessage, sender, sendResponse: (response?: any) => void) => {
@@ -208,7 +498,11 @@ chrome.runtime.onMessage.addListener(
         switch (message.action) {
           case 'signin':
             if (message.email && message.password) {
-              const result = await handleSignIn(message.email, message.password);
+              const result = await handleSignIn(
+                message.email, 
+                message.password, 
+                message.remember
+              );
               sendResponse(result);
             }
             break;
@@ -219,6 +513,10 @@ chrome.runtime.onMessage.addListener(
           case 'getSession':
             const sessionResult = await handleGetSession();
             sendResponse(sessionResult);
+            break;
+          case 'refreshSession':
+            const refreshResult = await handleRefreshSession();
+            sendResponse(refreshResult);
             break;
         }
       })();
@@ -258,7 +556,7 @@ chrome.runtime.onMessage.addListener(
           return;
         }
 
-        // Handle translation logic (same as before)
+        // Handle translation logic
         (async () => {
           try {
             let translation: string | null = null;
@@ -317,11 +615,31 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
+// Refresh session every 10 minutes
+setInterval(refreshSessionIfNeeded, 10 * 60 * 1000);
+
+// Restore session on startup
+chrome.runtime.onStartup.addListener(async () => {
+  console.log('Extension starting up, restoring session...');
+  await restoreSession();
+});
+
+// Restore session on install/update
+chrome.runtime.onInstalled.addListener(async () => {
+  console.log('Extension installed/updated, restoring session...');
+  await restoreSession();
+});
+
 // Initialize auth state
 (async () => {
-  const session = await getCurrentSession();
-  console.log('Initial auth state:', session ? 'Authenticated' : 'Not authenticated');
-  if (session) {
-    console.log('User:', session.user.email);
+  console.log('Initializing auth state...');
+  const { rememberMe } = await chrome.storage.local.get('rememberMe');
+  
+  if (rememberMe) {
+    console.log('Remember me enabled, restoring session...');
+    const restored = await restoreSession();
+    console.log('Session restoration:', restored ? 'successful' : 'failed');
+  } else {
+    console.log('Remember me not enabled');
   }
 })();

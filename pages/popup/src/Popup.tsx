@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react';
 
 type TranslationItem = {
+  id?: string; // Supabase UUID if synced
   original: string;
   translation: string;
   date: string;
@@ -22,38 +23,85 @@ export default function Popup() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [showAuthForm, setShowAuthForm] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
 
-  // Load translations and auth state on mount
+  // --- Effect: Load translations + auth state
   useEffect(() => {
     loadTranslations();
     checkAuth();
 
-    chrome.storage.local.get({ enabled: true }, res => {
-      setEnabled(res.enabled);
-    });
+    chrome.storage.local.get({ enabled: true }, res => setEnabled(res.enabled));
+    chrome.storage.local.get({ targetLang: 'EN-US' }, res => setTargetLang(res.targetLang));
 
-    chrome.storage.local.get({ targetLang: 'EN-US' }, res => {
-      setTargetLang(res.targetLang);
-    });
-  }, []);
+    // Listen for Supabase changes from background
+    chrome.runtime.onMessage.addListener(handleBackgroundMessage);
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleBackgroundMessage);
+    };
+  }, [user]);
 
-  const loadTranslations = () => {
-    chrome.storage.local.get({ translations: [] }, res => {
-      setItems(res.translations as TranslationItem[]);
-    });
-  };
-
-  const checkAuth = async () => {
-    const response = await chrome.runtime.sendMessage({
-      type: 'auth',
-      action: 'getSession',
-    });
-
-    if (response.success && response.user) {
-      setUser(response.user);
+  const handleBackgroundMessage = (msg: any) => {
+    if (msg.type === 'flashcardsUpdated') {
+      loadTranslations(); // reload whenever background notifies of change
     }
   };
 
+  // --- Load translations from both sources, Supabase wins
+  const loadTranslations = async () => {
+    if (user) {
+      const response = await chrome.runtime.sendMessage({
+        type: 'flashcards',
+        action: 'list',
+      });
+
+      if (response.success) {
+        setItems(response.data as TranslationItem[]);
+      } else {
+        console.error('Failed to load Supabase translations:', response.error);
+      }
+    } else {
+      // fallback to local only
+      chrome.storage.local.get({ translations: [] }, res => {
+        setItems(res.translations as TranslationItem[]);
+      });
+    }
+  };
+
+  // --- Check stored session
+  const checkAuth = async () => {
+    const { rememberMe } = await chrome.storage.local.get('rememberMe');
+    if (!rememberMe) {
+      setUser(null);
+      return;
+    }
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'auth',
+        action: 'getSession',
+      });
+
+      if (response.success && response.user) {
+        setUser(response.user);
+      } else {
+        const refreshResponse = await chrome.runtime.sendMessage({
+          type: 'auth',
+          action: 'refreshSession',
+        });
+        if (refreshResponse.success && refreshResponse.user) {
+          setUser(refreshResponse.user);
+        } else {
+          chrome.storage.local.remove('rememberMe');
+          setUser(null);
+        }
+      }
+    } catch (err) {
+      console.error('Error checking auth:', err);
+      setUser(null);
+    }
+  };
+
+  // --- Handle sign in + migrate local translations
   const handleSignIn = async () => {
     setLoading(true);
     const response = await chrome.runtime.sendMessage({
@@ -61,8 +109,8 @@ export default function Popup() {
       action: 'signin',
       email: authEmail,
       password: authPassword,
+      remember: rememberMe,
     });
-
     setLoading(false);
 
     if (response.success) {
@@ -70,6 +118,20 @@ export default function Popup() {
       setShowAuthForm(false);
       setAuthEmail('');
       setAuthPassword('');
+
+      // migrate local translations into Supabase
+      chrome.storage.local.get({ translations: [] }, async res => {
+        const localItems = res.translations as TranslationItem[];
+        if (localItems.length > 0) {
+          await chrome.runtime.sendMessage({
+            type: 'flashcards',
+            action: 'migrate',
+            items: localItems,
+          });
+          chrome.storage.local.set({ translations: [] });
+        }
+        loadTranslations();
+      });
     } else {
       alert('Sign in failed: ' + response.error);
     }
@@ -80,58 +142,71 @@ export default function Popup() {
       type: 'auth',
       action: 'signout',
     });
-
     if (response.success) {
       setUser(null);
+      setItems([]); // clear Supabase items
+      loadTranslations(); // reload local fallback
     }
   };
 
-  const removeItem = (index: number) => {
-    chrome.storage.local.get({ translations: [] }, res => {
-      const list = res.translations as TranslationItem[];
-      const newList = list.filter((_, i) => i !== index);
-      chrome.storage.local.set({ translations: newList }, () => {
-        setItems(newList);
+  // --- Remove one translation
+  const removeItem = async (index: number) => {
+    const item = items[index];
+    if (user && item.id) {
+      await chrome.runtime.sendMessage({
+        type: 'flashcards',
+        action: 'delete',
+        id: item.id,
       });
-    });
+    } else {
+      // update local only
+      chrome.storage.local.get({ translations: [] }, res => {
+        const list = res.translations as TranslationItem[];
+        const newList = list.filter((_, i) => i !== index);
+        chrome.storage.local.set({ translations: newList }, () => {
+          setItems(newList);
+        });
+      });
+    }
   };
 
-  const clearAll = () => {
+  // --- Clear all translations
+  const clearAll = async () => {
     if (!confirm('Clear all saved translations?')) return;
-    chrome.storage.local.set({ translations: [] }, () => {
+
+    if (user) {
+      await chrome.runtime.sendMessage({
+        type: 'flashcards',
+        action: 'clearAll',
+      });
       setItems([]);
-    });
+    } else {
+      chrome.storage.local.set({ translations: [] }, () => {
+        setItems([]);
+      });
+    }
   };
 
+  // --- Settings
   const toggleExtension = (checked: boolean) => {
     setEnabled(checked);
     chrome.storage.local.set({ enabled: checked });
   };
-
   const changeTargetLang = (lang: string) => {
     setTargetLang(lang);
     chrome.storage.local.set({ targetLang: lang });
   };
 
   const openFlashcards = () => {
-    chrome.tabs.create({ url: chrome.runtime.getURL('new-tab/index.html') });
+    window.open('https://learn-translate-flash.fly.dev/flashcards', '_blank');
   };
 
   const escapeHtml = (s: string) =>
-    String(s).replace(
-      /[&<>"']/g,
-      m =>
-        ({
-          '&': '&amp;',
-          '<': '&lt;',
-          '>': '&gt;',
-          '"': '&quot;',
-          "'": '&#39;',
-        })[m] || m,
-    );
+    String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m] || m));
+
 
   return (
-    <div style={{ fontFamily: 'system-ui, Arial', margin: 8, width: 380 }}>
+    <div style={{ fontFamily: 'system-ui, Arial', margin: 8 }}>
       {/* Authentication Section */}
       <div style={{ marginBottom: 15, padding: 10, borderBottom: '1px solid #eee' }}>
         {user ? (
@@ -185,6 +260,15 @@ export default function Popup() {
                     fontSize: 12,
                   }}
                 />
+                <label style={{ display: 'flex', alignItems: 'center', marginBottom: '6px', fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={e => setRememberMe(e.target.checked)}
+                    style={{ marginRight: '6px' }}
+                  />
+                  Remember me
+                </label>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <button
                     onClick={handleSignIn}
@@ -217,6 +301,7 @@ export default function Popup() {
                 </div>
               </div>
             ) : (
+              <>
               <button
                 onClick={() => setShowAuthForm(true)}
                 style={{
@@ -230,6 +315,18 @@ export default function Popup() {
                 }}>
                 Sign In to Sync Translations
               </button>
+            <p style={{ marginTop: '10px', fontSize: '14px', color: '#666' }}>
+              or{' '}
+              <a 
+                href="https://learn-translate-flash.fly.dev/auth" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                style={{ color: '#007bff', textDecoration: 'none' }}
+              >
+              create an account here
+              </a>
+            </p>
+            </>
             )}
           </div>
         )}
@@ -317,7 +414,7 @@ export default function Popup() {
         Enable extension
       </label>
 
-      <div id="list" style={{ marginTop: 10, maxHeight: 300, overflowY: 'auto' }}>
+      <div id="list" style={{ marginTop: 10, maxHeight: 300, overflowY: 'auto', overflowX: 'hidden' }}>
         {items.length === 0 ? (
           <div style={{ color: '#666', textAlign: 'center', padding: 20 }}>
             No saved translations yet. Highlight text on any page to save.
@@ -329,17 +426,12 @@ export default function Popup() {
             .map((it, idx) => {
               const d = new Date(it.date);
               return (
-                <div
-                  key={idx}
-                  style={{
-                    padding: 8,
-                    borderBottom: '1px solid #eee',
-                  }}>
+                <div key={idx} style={{ padding: 8, borderBottom: '1px solid #eee' }}>
                   <div style={{ fontWeight: 600 }}>{escapeHtml(it.original)}</div>
                   <div style={{ color: '#1a1a1a', marginTop: 4 }}>{escapeHtml(it.translation)}</div>
-                  <div style={{ fontSize: 11, color: '#666', marginTop: 6 }}>{`${d.toLocaleString()} ${
-                    it.url ? ' — ' + escapeHtml(it.url) : ''
-                  }`}</div>
+                  <div style={{ fontSize: 11, color: '#666', marginTop: 6 }}>
+                    {`${d.toLocaleString()} ${it.url ? ' — ' + escapeHtml(it.url) : ''}`}
+                  </div>
                   <button
                     onClick={() => removeItem(items.length - 1 - idx)}
                     style={{
