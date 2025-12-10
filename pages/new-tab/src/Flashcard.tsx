@@ -6,6 +6,8 @@ type TranslationItem = {
   translation: string;
   date: string;
   url?: string;
+  original_language?: string;
+  translation_language?: string;
 };
 
 type SiteGroup = {
