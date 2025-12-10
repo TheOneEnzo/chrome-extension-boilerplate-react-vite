@@ -4,7 +4,7 @@ const manifest = {
   manifest_version: 3,
   default_locale: 'en',
   name: 'Highlight Translator',
-  version: '1.0',
+  version: '2.5',
   description: 'Highlight any text to translate instantly and save for flashcards.',
   permissions: ['storage'],
   background: {
