@@ -36,11 +36,17 @@ document.addEventListener('mousedown', removeTooltip);
 
 document.addEventListener('mouseup', (ev: MouseEvent) => {
   const selection = window.getSelection();
-  const selectedText: string = selection?.toString().trim() ?? '';
+  let selectedText: string = selection?.toString().trim() ?? '';
 
   if (!selectedText) {
     lastSelection = '';
     return;
+  }
+  console.log(selectedText);
+  // --- NEW: Truncate to 10 characters max ---
+  if (selectedText.length > 50) {
+    selectedText = selectedText.substring(0, 50);
+    console.log(selectedText);
   }
 
   // Avoid duplicate requests
@@ -56,7 +62,7 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
     rect = { top: ev.clientY, left: ev.clientX };
   }
 
-  // --- NEW: Grab context around the selection ---
+  // --- Grab context around the selection ---
   let contextText = selectedText;
 
   try {
@@ -71,7 +77,7 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
         // Split into sentences
         const sentences = blockText.match(/[^.!?]+[.!?]+/g) || [blockText];
 
-        // Find the sentence containing the selection
+        // Find the sentence containing the (now truncated) selection
         const idx = sentences.findIndex(s => s.includes(selectedText));
 
         if (idx !== -1) {
@@ -84,18 +90,18 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
     }
   } catch (err) {
     console.error('Error grabbing context:', err);
-    contextText = selectedText; // fallback to selection only
+    contextText = selectedText; // fallback to truncated selection
   }
 
   // Optional: truncate context for tooltip/translation requests
-  const truncatedText = contextText.length > 300 ? contextText.substring(0, 300) : contextText;
+  const truncatedContext = contextText.length > 300 ? contextText.substring(0, 300) : contextText;
 
   // Send to background for translation
   chrome.runtime.sendMessage(
     {
       type: 'translate',
-      highlightedWord: selectedText,    // The actual word user highlighted
-      text: contextText,                // The surrounding context
+      highlightedWord: selectedText, // The truncated word
+      text: truncatedContext, // The surrounding context
       url: window.location.href,
     },
     (response?: { translation?: string }) => {
