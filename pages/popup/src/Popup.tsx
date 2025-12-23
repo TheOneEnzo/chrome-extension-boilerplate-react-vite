@@ -16,6 +16,17 @@ type User = {
   email: string;
 };
 
+type SubscriptionStatus = {
+  subscribed: boolean;
+  productId?: string;
+  subscriptionEnd?: string;
+};
+
+type CharacterUsage = {
+  used: number;
+  limit: number;
+};
+
 export default function Popup() {
   const [items, setItems] = useState<TranslationItem[]>([]);
   const [enabled, setEnabled] = useState(true);
@@ -26,11 +37,20 @@ export default function Popup() {
   const [authPassword, setAuthPassword] = useState('');
   const [showAuthForm, setShowAuthForm] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
+  const [subscription, setSubscription] = useState<SubscriptionStatus | null>(null);
+  const [characterUsage, setCharacterUsage] = useState<CharacterUsage | null>(null);
 
   // --- Effect: Load translations + auth state
   useEffect(() => {
-    loadTranslations();
-    checkAuth();
+    const initialize = async () => {
+      await checkAuth();
+      loadTranslations();
+      
+      // Load character usage immediately (works for both logged in and not logged in)
+      loadCharacterUsage();
+    };
+    
+    initialize();
 
     chrome.storage.local.get({ enabled: true }, res => setEnabled(res.enabled));
     chrome.storage.local.get({ targetLang: 'EN-US' }, res => setTargetLang(res.targetLang));
@@ -40,7 +60,27 @@ export default function Popup() {
     return () => {
       chrome.runtime.onMessage.removeListener(handleBackgroundMessage);
     };
+  }, []);
+
+  // --- Effect: Load subscription and usage when user changes
+  useEffect(() => {
+    if (user) {
+      loadSubscription();
+      loadCharacterUsage();
+    } else {
+      setSubscription(null);
+      loadCharacterUsage(); // Still load usage for non-logged-in users
+    }
   }, [user]);
+
+  // --- Refresh character usage periodically when popup is open
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadCharacterUsage();
+    }, 5000); // Refresh every 5 seconds
+
+    return () => clearInterval(interval);
+  }, []);
 
   const handleBackgroundMessage = (msg: any) => {
     if (msg.type === 'flashcardsUpdated') {
@@ -83,14 +123,14 @@ export default function Popup() {
         action: 'getSession',
       });
 
-      if (response.success && response.user) {
+      if (response && response.success && response.user) {
         setUser(response.user);
       } else {
         const refreshResponse = await chrome.runtime.sendMessage({
           type: 'auth',
           action: 'refreshSession',
         });
-        if (refreshResponse.success && refreshResponse.user) {
+        if (refreshResponse && refreshResponse.success && refreshResponse.user) {
           setUser(refreshResponse.user);
         } else {
           chrome.storage.local.remove('rememberMe');
@@ -122,6 +162,8 @@ export default function Popup() {
       setAuthPassword('');
 
       loadTranslations();
+      loadSubscription();
+      loadCharacterUsage();
       
     } else {
       alert('Sign in failed: ' + response.error);
@@ -136,7 +178,72 @@ export default function Popup() {
     if (response.success) {
       setUser(null);
       setItems([]); // Just clear the items
+      setSubscription(null);
+      loadCharacterUsage(); // Reload usage for non-logged-in state
     }
+  };
+
+  // --- Load subscription status
+  const loadSubscription = async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'subscription',
+        action: 'check',
+      });
+      console.log('Subscription response:', response);
+      if (response && response.success) {
+        setSubscription({
+          subscribed: response.subscribed || false,
+          productId: response.productId,
+          subscriptionEnd: response.subscriptionEnd,
+        });
+      } else {
+        console.error('Subscription check failed:', response);
+      }
+    } catch (err) {
+      console.error('Error loading subscription:', err);
+    }
+  };
+
+  // --- Load character usage
+  const loadCharacterUsage = async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'subscription',
+        action: 'getUsage',
+      });
+      console.log('Character usage response:', response);
+      if (response && response.success) {
+        setCharacterUsage({
+          used: response.used || 0,
+          limit: response.limit || 500,
+        });
+      } else {
+        console.error('Character usage check failed:', response);
+        // Set default values if request fails
+        setCharacterUsage({
+          used: 0,
+          limit: user ? 2000 : 500,
+        });
+      }
+    } catch (err) {
+      console.error('Error loading character usage:', err);
+      // Set default values on error
+      setCharacterUsage({
+        used: 0,
+        limit: user ? 2000 : 500,
+      });
+    }
+  };
+
+  // --- Get subscription tier name
+  const getSubscriptionTier = (): string => {
+    if (!user) return 'Not Logged In';
+    if (!subscription) return 'Loading...';
+    if (!subscription.subscribed) return 'Free';
+    if (subscription.productId === 'prod_TdgBRg4vUcghkL') return 'Pro';
+    if (subscription.productId === 'prod_TdgB3FcPDfpXCJ') return 'Premium';
+    return 'Free';
   };
 
     // --- Remove one translation
@@ -193,19 +300,40 @@ export default function Popup() {
             <p style={{ margin: '0 0 8px 0', fontSize: 14 }}>
               Welcome, <strong>{user.email}</strong>
             </p>
-            <button
-              onClick={handleSignOut}
-              style={{
-                padding: '4px 8px',
-                backgroundColor: '#ff4444',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: 12,
-              }}>
-              Sign Out
-            </button>
+            <p style={{ margin: '0 0 8px 0', fontSize: 12, color: '#666' }}>
+              Plan: <strong>{getSubscriptionTier()}</strong>
+            </p>
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+              <button
+                onClick={() => {
+                  loadSubscription();
+                  loadCharacterUsage();
+                }}
+                style={{
+                  padding: '4px 8px',
+                  backgroundColor: '#1a73e8',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: 11,
+                }}>
+                Refresh
+              </button>
+              <button
+                onClick={handleSignOut}
+                style={{
+                  padding: '4px 8px',
+                  backgroundColor: '#ff4444',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                }}>
+                Sign Out
+              </button>
+            </div>
           </div>
         ) : (
           <div>
@@ -392,6 +520,55 @@ export default function Popup() {
         <input type="checkbox" checked={enabled} onChange={e => toggleExtension(e.target.checked)} />
         Enable extension
       </label>
+
+      {/* Character Usage Progress Bar */}
+      <div style={{ marginTop: 15, padding: 10, backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <span style={{ fontSize: 12, fontWeight: 'bold' }}>Character Usage</span>
+          {characterUsage ? (
+            <span style={{ fontSize: 12, color: '#666' }}>
+              {characterUsage.used.toLocaleString()} / {characterUsage.limit.toLocaleString()}
+            </span>
+          ) : (
+            <span style={{ fontSize: 12, color: '#666' }}>Loading...</span>
+          )}
+        </div>
+        {characterUsage ? (
+          <>
+            <div
+              style={{
+                width: '100%',
+                height: 8,
+                backgroundColor: '#e0e0e0',
+                borderRadius: 4,
+                overflow: 'hidden',
+              }}>
+              <div
+                style={{
+                  width: `${Math.min((characterUsage.used / characterUsage.limit) * 100, 100)}%`,
+                  height: '100%',
+                  backgroundColor:
+                    characterUsage.used / characterUsage.limit > 0.9
+                      ? '#ff4444'
+                      : characterUsage.used / characterUsage.limit > 0.7
+                      ? '#ffa500'
+                      : '#1a73e8',
+                  transition: 'width 0.3s ease',
+                }}
+              />
+            </div>
+            <div style={{ fontSize: 11, color: '#666', marginTop: 4, textAlign: 'center' }}>
+              {characterUsage.limit - characterUsage.used > 0
+                ? `${(characterUsage.limit - characterUsage.used).toLocaleString()} characters remaining this month`
+                : 'Character limit reached'}
+            </div>
+          </>
+        ) : (
+          <div style={{ fontSize: 11, color: '#666', marginTop: 4, textAlign: 'center' }}>
+            Loading usage data...
+          </div>
+        )}
+      </div>
 
       {user && (
         <div style={{ marginTop: 10, fontSize: 12, color: '#666', textAlign: 'center' }}>
