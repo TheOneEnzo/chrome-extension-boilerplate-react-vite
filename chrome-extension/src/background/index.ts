@@ -14,6 +14,21 @@ const supabaseUrl = 'https://bivafzwsqftbpnoomcyv.supabase.co';
 const supabase = createClient(supabaseUrl, SUPABASE_KEY);
 console.log('Supabase initialized:', !!supabase);
 
+// Subscription endpoint
+const SUBSCRIPTION_ENDPOINT = 'https://bivafzwsqftbpnoomcyv.supabase.co/functions/v1/check-subscription';
+
+// Product IDs
+const PRO_PRODUCT_ID = 'prod_TdgBRg4vUcghkL';
+const PREMIUM_PRODUCT_ID = 'prod_TdgB3FcPDfpXCJ';
+
+// Character limits
+const CHAR_LIMITS = {
+  NOT_LOGGED_IN: 500,
+  LOGGED_IN: 2000,
+  PRO: 10000,
+  PREMIUM: 20000,
+};
+
 // Simple in-memory cache
 const cache: Record<string, string> = {};
 
@@ -43,6 +58,26 @@ interface AuthResponse {
   user?: any;
   error?: string;
   session?: any;
+}
+
+interface SubscriptionMessage {
+  type: 'subscription';
+  action: 'check' | 'getUsage';
+}
+
+interface SubscriptionResponse {
+  success: boolean;
+  subscribed?: boolean;
+  productId?: string;
+  subscriptionEnd?: string;
+  error?: string;
+}
+
+interface UsageResponse {
+  success: boolean;
+  used?: number;
+  limit?: number;
+  error?: string;
 }
 
 // Store session data in chrome.storage for persistence
@@ -420,9 +455,133 @@ async function handleRefreshSession(): Promise<AuthResponse> {
   }
 }
 
+// Check subscription status
+async function checkSubscription(): Promise<SubscriptionResponse> {
+  try {
+    const session = await getCurrentSession();
+    console.log('checkSubscription - session exists:', !!session);
+    
+    if (!session || !session.access_token) {
+      console.log('checkSubscription - no session or access token');
+      return { success: true, subscribed: false };
+    }
+
+    console.log('checkSubscription - calling endpoint:', SUBSCRIPTION_ENDPOINT);
+    const response = await fetch(SUBSCRIPTION_ENDPOINT, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${session.access_token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      console.error('Subscription check failed:', response.status, response.statusText);
+      const errorText = await response.text();
+      console.error('Error response:', errorText);
+      return { success: true, subscribed: false };
+    }
+
+    const data = await response.json();
+    console.log('checkSubscription - response data:', data);
+    return {
+      success: true,
+      subscribed: data.subscribed || false,
+      productId: data.productId,
+      subscriptionEnd: data.subscriptionEnd,
+    };
+  } catch (error) {
+    console.error('Error checking subscription:', error);
+    return { success: false, error: 'Failed to check subscription' };
+  }
+}
+
+// Get character limit based on subscription status
+async function getCharacterLimit(): Promise<number> {
+  const { rememberMe } = await chrome.storage.local.get('rememberMe');
+  
+  if (!rememberMe) {
+    return CHAR_LIMITS.NOT_LOGGED_IN;
+  }
+
+  const subscription = await checkSubscription();
+  
+  if (!subscription.success || !subscription.subscribed) {
+    return CHAR_LIMITS.LOGGED_IN;
+  }
+
+  if (subscription.productId === PREMIUM_PRODUCT_ID) {
+    return CHAR_LIMITS.PREMIUM;
+  } else if (subscription.productId === PRO_PRODUCT_ID) {
+    return CHAR_LIMITS.PRO;
+  }
+
+  return CHAR_LIMITS.LOGGED_IN;
+}
+
+// Get current month key (YYYY-MM format)
+function getCurrentMonthKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// Get character usage for current month
+async function getCharacterUsage(): Promise<{ used: number; limit: number; monthKey: string }> {
+  const monthKey = getCurrentMonthKey();
+  const result = await chrome.storage.local.get(['charUsage', 'charUsageMonth']);
+  
+  // Reset if it's a new month
+  if (result.charUsageMonth !== monthKey) {
+    await chrome.storage.local.set({
+      charUsage: 0,
+      charUsageMonth: monthKey,
+    });
+    return { used: 0, limit: await getCharacterLimit(), monthKey };
+  }
+
+  const limit = await getCharacterLimit();
+  return {
+    used: result.charUsage || 0,
+    limit,
+    monthKey,
+  };
+}
+
+// Increment character usage
+async function incrementCharacterUsage(count: number): Promise<boolean> {
+  const usage = await getCharacterUsage();
+  
+  if (usage.used + count > usage.limit) {
+    return false; // Would exceed limit
+  }
+
+  await chrome.storage.local.set({
+    charUsage: usage.used + count,
+    charUsageMonth: usage.monthKey,
+  });
+
+  return true;
+}
+
+// Get character usage info for popup
+async function getUsageInfo(): Promise<UsageResponse> {
+  try {
+    const usage = await getCharacterUsage();
+    console.log('getUsageInfo returning:', { used: usage.used, limit: usage.limit });
+    return {
+      success: true,
+      used: usage.used,
+      limit: usage.limit,
+    };
+  } catch (error) {
+    console.error('Error getting usage info:', error);
+    return { success: false, error: 'Failed to get usage info' };
+  }
+}
+
 // Main message listener
 chrome.runtime.onMessage.addListener(
-  (message: TranslationMessage | AuthMessage, sender, sendResponse: (response?: any) => void) => {
+  (message: TranslationMessage | AuthMessage | SubscriptionMessage, sender, sendResponse: (response?: any) => void) => {
     // Handle authentication messages
     if (message.type === 'auth') {
       (async () => {
@@ -454,6 +613,23 @@ chrome.runtime.onMessage.addListener(
       return true;
     }
 
+    // Handle subscription messages
+    if (message.type === 'subscription') {
+      (async () => {
+        switch (message.action) {
+          case 'check':
+            const subResult = await checkSubscription();
+            sendResponse(subResult);
+            break;
+          case 'getUsage':
+            const usageResult = await getUsageInfo();
+            sendResponse(usageResult);
+            break;
+        }
+      })();
+      return true;
+    }
+
     if (message.type === 'translate') {
       chrome.storage.local.get({ enabled: true, targetLang: DEFAULT_TARGET_LANG }, async res => {
         if (!res.enabled) {
@@ -476,6 +652,7 @@ chrome.runtime.onMessage.addListener(
 
         const cacheKey = `${highlightedWord}|${targetLang}`;
 
+        // Check in-memory cache first
         if (cache[cacheKey]) {
           // Save main flashcard with context
           await saveTranslation(
@@ -492,7 +669,7 @@ chrome.runtime.onMessage.addListener(
           return;
         }
 
-        // Check Supabase for highlighted word first
+        // Check Supabase cache
         const supabaseCachedTranslation = await checkSupabaseCache(highlightedWord, targetLang);
         if (supabaseCachedTranslation) {
           cache[cacheKey] = supabaseCachedTranslation;
@@ -509,6 +686,17 @@ chrome.runtime.onMessage.addListener(
           );
           
           sendResponse({ translation: supabaseCachedTranslation, fromCache: true });
+          return;
+        }
+
+        // If we get here, we need a new translation - check character limit
+        const charCount = highlightedWord.length;
+        const usage = await getCharacterUsage();
+        
+        if (usage.used + charCount > usage.limit) {
+          sendResponse({ 
+            error: `Character limit reached. You've used ${usage.used}/${usage.limit} characters this month.` 
+          });
           return;
         }
 
@@ -543,6 +731,12 @@ chrome.runtime.onMessage.addListener(
 
               const safeTranslation = translation ?? '[null translation]';
               cache[cacheKey] = safeTranslation;
+
+              // Increment character usage for new translation
+              const incrementSuccess = await incrementCharacterUsage(charCount);
+              if (!incrementSuccess) {
+                console.warn('Character limit exceeded, but translation already completed');
+              }
 
               // Save with the captured languages
               await saveTranslation(
