@@ -1,6 +1,6 @@
+/* eslint-disable func-style, @typescript-eslint/no-explicit-any */
 // Background service worker for translations + caching + saving + authentication
 import { createClient } from '@supabase/supabase-js';
-import { sync } from 'fast-glob';
 
 const API_KEY: string = process.env.CEB_API_KEY || '';
 const SUPABASE_KEY: string = process.env.CEB_SUPABASE_KEY || '';
@@ -71,12 +71,6 @@ interface AuthMessage {
   remember?: boolean;
 }
 
-interface TranslationResponse {
-  translation?: string;
-  error?: string;
-  fromCache?: boolean;
-}
-
 interface AuthResponse {
   success: boolean;
   user?: any;
@@ -112,8 +106,8 @@ async function storeSessionData(session: any) {
         access_token: session.access_token,
         refresh_token: session.refresh_token,
         expires_at: session.expires_at,
-        user: session.user
-      }
+        user: session.user,
+      },
     });
   }
 }
@@ -136,12 +130,12 @@ async function getCurrentSession() {
       data: { session },
       error,
     } = await supabase.auth.getSession();
-    
+
     if (error) {
       console.error('Session error:', error);
       return null;
     }
-    
+
     return session;
   } catch (error) {
     console.error('Error in getCurrentSession:', error);
@@ -166,13 +160,13 @@ function isSessionExpired(session: any): boolean {
 async function restoreSession(): Promise<boolean> {
   try {
     const { rememberMe } = await chrome.storage.local.get('rememberMe');
-    
+
     if (!rememberMe) {
       return false;
     }
 
     const storedSession = await getStoredSessionData();
-    
+
     if (!storedSession) {
       console.log('No stored session found');
       return false;
@@ -181,13 +175,13 @@ async function restoreSession(): Promise<boolean> {
     // Check if session is expired
     if (isSessionExpired(storedSession)) {
       console.log('Stored session expired, attempting refresh...');
-      
+
       // Set the expired session first
       const { error: setSessionError } = await supabase.auth.setSession({
         access_token: storedSession.access_token,
-        refresh_token: storedSession.refresh_token
+        refresh_token: storedSession.refresh_token,
       });
-      
+
       if (setSessionError) {
         console.error('Error setting expired session:', setSessionError);
         await clearStoredSessionData();
@@ -196,7 +190,7 @@ async function restoreSession(): Promise<boolean> {
 
       // Now try to refresh
       const { data, error: refreshError } = await supabase.auth.refreshSession();
-      
+
       if (refreshError) {
         console.error('Error refreshing session:', refreshError);
         await clearStoredSessionData();
@@ -213,15 +207,15 @@ async function restoreSession(): Promise<boolean> {
       console.log('Restoring valid session from storage');
       const { error } = await supabase.auth.setSession({
         access_token: storedSession.access_token,
-        refresh_token: storedSession.refresh_token
+        refresh_token: storedSession.refresh_token,
       });
-      
+
       if (error) {
         console.error('Error restoring session:', error);
         await clearStoredSessionData();
         return false;
       }
-      
+
       return true;
     }
 
@@ -236,13 +230,13 @@ async function restoreSession(): Promise<boolean> {
 async function refreshSessionIfNeeded() {
   try {
     const { rememberMe } = await chrome.storage.local.get('rememberMe');
-    
+
     if (!rememberMe) {
       return;
     }
 
     const session = await getCurrentSession();
-    
+
     if (!session) {
       console.log('No active session to refresh');
       return;
@@ -251,11 +245,11 @@ async function refreshSessionIfNeeded() {
     // Check if session will expire soon (within 5 minutes)
     const now = Math.floor(Date.now() / 1000);
     const expiresSoon = session.expires_at - now < 300; // 5 minutes
-    
+
     if (expiresSoon) {
       console.log('Session expires soon, refreshing...');
       const { data, error } = await supabase.auth.refreshSession();
-      
+
       if (error) {
         console.error('Error refreshing session:', error);
         // Don't clear rememberMe immediately, try to restore on next operation
@@ -272,14 +266,14 @@ async function refreshSessionIfNeeded() {
 // Ensure user is authenticated before operations
 async function ensureAuthenticated(): Promise<boolean> {
   const { rememberMe } = await chrome.storage.local.get('rememberMe');
-  
+
   if (!rememberMe) {
     return false;
   }
 
   // First try to get current session
-  let session = await getCurrentSession();
-  
+  const session = await getCurrentSession();
+
   if (session && !isSessionExpired(session)) {
     return true;
   }
@@ -296,7 +290,7 @@ async function saveTranslation(
   targetLang: string,
   contextText: string = '',
   originalLang: string = 'auto',
-  translationLang: string = ''
+  translationLang: string = '',
 ): Promise<void> {
   try {
     const isAuthenticated = await ensureAuthenticated();
@@ -319,7 +313,7 @@ async function saveTranslation(
       translation,
       originalLang,
       translationLang: finalTranslationLang,
-      context: contextText
+      context: contextText,
     });
 
     // Insert with insert on (user_id, original)
@@ -369,6 +363,7 @@ async function checkSupabaseCache(text: string, targetLang: string): Promise<str
       .select('translation')
       .eq('original', text)
       .eq('user_id', userId)
+      .eq('translation_language', targetLang)
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -399,12 +394,12 @@ async function handleSignIn(email: string, password: string, remember: boolean =
 
     // Store session data for persistence
     if (remember && data.session) {
-      await chrome.storage.local.set({ 
+      await chrome.storage.local.set({
         rememberMe: true,
-        userEmail: email
+        userEmail: email,
       });
       await storeSessionData(data.session);
-    } 
+    }
     return { success: true, user: data.user, session: data.session };
   } catch (error) {
     console.error('Sign in error:', error);
@@ -440,19 +435,19 @@ async function handleSignOut(): Promise<AuthResponse> {
 async function handleGetSession(): Promise<AuthResponse> {
   try {
     const { rememberMe } = await chrome.storage.local.get('rememberMe');
-    
+
     if (!rememberMe) {
       return { success: false, error: 'Remember me not enabled' };
     }
 
     // Try to restore session first
     const sessionRestored = await restoreSession();
-    
+
     if (sessionRestored) {
       const session = await getCurrentSession();
       return { success: true, session, user: session?.user };
     }
-    
+
     return { success: false, error: 'Could not restore session' };
   } catch (error) {
     console.error('Get session error:', error);
@@ -463,7 +458,7 @@ async function handleGetSession(): Promise<AuthResponse> {
 async function handleRefreshSession(): Promise<AuthResponse> {
   try {
     const { data, error } = await supabase.auth.refreshSession();
-    
+
     if (error) {
       console.error('Refresh session error:', error);
       await clearStoredSessionData();
@@ -491,7 +486,7 @@ async function checkSubscription(): Promise<SubscriptionResponse> {
 
     const session = await getCurrentSession();
     console.log('checkSubscription - session exists:', !!session);
-    
+
     if (!session || !session.access_token) {
       console.log('checkSubscription - no session or access token');
       return { success: true, subscribed: false };
@@ -501,7 +496,7 @@ async function checkSubscription(): Promise<SubscriptionResponse> {
     const response = await fetch(SUBSCRIPTION_ENDPOINT, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${session.access_token}`,
+        Authorization: `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',
       },
     });
@@ -532,13 +527,13 @@ async function checkSubscription(): Promise<SubscriptionResponse> {
 // Get character limit based on subscription status
 async function getCharacterLimit(): Promise<number> {
   const { rememberMe } = await chrome.storage.local.get('rememberMe');
-  
+
   if (!rememberMe) {
     return CHAR_LIMITS.NOT_LOGGED_IN;
   }
 
   const subscription = await checkSubscription();
-  
+
   if (!subscription.success || !subscription.subscribed) {
     return CHAR_LIMITS.LOGGED_IN;
   }
@@ -562,7 +557,7 @@ function getCurrentMonthKey(): string {
 async function getCharacterUsage(): Promise<{ used: number; limit: number; monthKey: string }> {
   const monthKey = getCurrentMonthKey();
   const result = await chrome.storage.local.get(['charUsage', 'charUsageMonth']);
-  
+
   // Reset if it's a new month
   if (result.charUsageMonth !== monthKey) {
     await chrome.storage.local.set({
@@ -583,7 +578,7 @@ async function getCharacterUsage(): Promise<{ used: number; limit: number; month
 // Increment character usage
 async function incrementCharacterUsage(count: number): Promise<boolean> {
   const usage = await getCharacterUsage();
-  
+
   if (usage.used + count > usage.limit) {
     return false; // Would exceed limit
   }
@@ -619,28 +614,28 @@ chrome.runtime.onMessage.addListener(
     if (message.type === 'auth') {
       (async () => {
         switch (message.action) {
-          case 'signin':
+          case 'signin': {
             if (message.email && message.password) {
-              const result = await handleSignIn(
-                message.email, 
-                message.password, 
-                message.remember
-              );
+              const result = await handleSignIn(message.email, message.password, message.remember);
               sendResponse(result);
             }
             break;
-          case 'signout':
+          }
+          case 'signout': {
             const result = await handleSignOut();
             sendResponse(result);
             break;
-          case 'getSession':
+          }
+          case 'getSession': {
             const sessionResult = await handleGetSession();
             sendResponse(sessionResult);
             break;
-          case 'refreshSession':
+          }
+          case 'refreshSession': {
             const refreshResult = await handleRefreshSession();
             sendResponse(refreshResult);
             break;
+          }
         }
       })();
       return true;
@@ -650,14 +645,16 @@ chrome.runtime.onMessage.addListener(
     if (message.type === 'subscription') {
       (async () => {
         switch (message.action) {
-          case 'check':
+          case 'check': {
             const subResult = await checkSubscription();
             sendResponse(subResult);
             break;
-          case 'getUsage':
+          }
+          case 'getUsage': {
             const usageResult = await getUsageInfo();
             sendResponse(usageResult);
             break;
+          }
         }
       })();
       return true;
@@ -694,13 +691,13 @@ chrome.runtime.onMessage.addListener(
           const cachedTranslation = cache[cacheKey];
           sendResponse({ translation: cachedTranslation, fromCache: true });
           void saveTranslation(
-            highlightedWord, 
-            cachedTranslation, 
-            pageUrl, 
-            targetLang, 
+            highlightedWord,
+            cachedTranslation,
+            pageUrl,
+            targetLang,
             contextText,
             'auto',
-            targetLang
+            targetLang,
           );
           return;
         }
@@ -711,13 +708,13 @@ chrome.runtime.onMessage.addListener(
           cache[cacheKey] = supabaseCachedTranslation;
           sendResponse({ translation: supabaseCachedTranslation, fromCache: true });
           void saveTranslation(
-            highlightedWord, 
-            supabaseCachedTranslation, 
-            pageUrl, 
-            targetLang, 
+            highlightedWord,
+            supabaseCachedTranslation,
+            pageUrl,
+            targetLang,
             contextText,
             'auto',
-            targetLang
+            targetLang,
           );
           return;
         }
@@ -725,10 +722,10 @@ chrome.runtime.onMessage.addListener(
         // If we get here, we need a new translation - check character limit
         const charCount = highlightedWord.length;
         const usage = await getCharacterUsage();
-        
+
         if (usage.used + charCount > usage.limit) {
-          sendResponse({ 
-            error: `Character limit reached. You've used ${usage.used}/${usage.limit} characters this month.` 
+          sendResponse({
+            error: `Character limit reached. You've used ${usage.used}/${usage.limit} characters this month.`,
           });
           return;
         }
@@ -768,7 +765,7 @@ chrome.runtime.onMessage.addListener(
                 sendResponse({ error: `DeepL error ${resp.status}` });
                 return;
               }
-              
+
               // Extract detected language
               if (data?.translations?.length > 0) {
                 translation = data.translations[0].text;
@@ -789,21 +786,19 @@ chrome.runtime.onMessage.addListener(
                 }
               });
               void saveTranslation(
-                highlightedWord, 
-                safeTranslation, 
-                pageUrl, 
-                targetLang, 
+                highlightedWord,
+                safeTranslation,
+                pageUrl,
+                targetLang,
                 contextText,
                 detectedSourceLang,
-                targetLang
+                targetLang,
               );
-            } 
-            else {
+            } else {
               // Handle case where API_KEY is not available
               sendResponse({ error: 'API key not configured' });
             }
-          } 
-          catch (err) {
+          } catch (err) {
             console.error('Translation error', err);
             sendResponse({ translation: '[error]' });
           }
@@ -835,7 +830,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   console.log('Initializing auth state...');
   void loadSettingsCache();
   const { rememberMe } = await chrome.storage.local.get('rememberMe');
-  
+
   if (rememberMe) {
     console.log('Remember me enabled, restoring session...');
     const restored = await restoreSession();

@@ -25,11 +25,6 @@ const showTooltip = (text: string, rect: DOMRect | { top: number; left: number }
 
   document.body.appendChild(div);
   tooltip = div;
-
-  setTimeout(() => {
-    if (tooltip) tooltip.remove();
-    tooltip = null;
-  }, 7000);
 };
 
 document.addEventListener('mousedown', removeTooltip);

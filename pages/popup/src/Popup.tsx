@@ -1,5 +1,5 @@
 // Popup.tsx
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 type TranslationItem = {
   id?: string; // Supabase UUID if synced
@@ -44,11 +44,11 @@ export default function Popup() {
     const initialize = async () => {
       await checkAuth();
       loadTranslations();
-      
+
       // Load character usage immediately (works for both logged in and not logged in)
       loadCharacterUsage();
     };
-    
+
     initialize();
 
     chrome.storage.local.get({ enabled: true }, res => setEnabled(res.enabled));
@@ -81,7 +81,7 @@ export default function Popup() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleBackgroundMessage = (msg: any) => {
+  const handleBackgroundMessage = (msg: { type?: string }) => {
     if (msg.type === 'flashcardsUpdated') {
       loadTranslations(); // reload whenever background notifies of change
     }
@@ -163,7 +163,6 @@ export default function Popup() {
       loadTranslations();
       loadSubscription();
       loadCharacterUsage();
-      
     } else {
       alert('Sign in failed: ' + response.error);
     }
@@ -245,33 +244,6 @@ export default function Popup() {
     return 'Free';
   };
 
-    // --- Remove one translation
-  const removeItem = async (index: number) => {
-    const item = items[index];
-    if (user && item.id) {
-      await chrome.runtime.sendMessage({
-        type: 'flashcards',
-        action: 'delete',
-        id: item.id,
-      });
-      // Reload translations after deletion
-      loadTranslations();
-    }
-  };
-
-  // --- Clear all translations
-  const clearAll = async () => {
-    if (!confirm('Clear all saved translations?')) return;
-
-    if (user) {
-      await chrome.runtime.sendMessage({
-        type: 'flashcards',
-        action: 'clearAll',
-      });
-      setItems([]);
-    }
-  };
-
   // --- Settings
   const toggleExtension = (checked: boolean) => {
     setEnabled(checked);
@@ -285,10 +257,6 @@ export default function Popup() {
   const openFlashcards = () => {
     window.open('https://highlightranslator.com/flashcards', '_blank');
   };
-
-  const escapeHtml = (s: string) =>
-    String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m] || m));
-
 
   return (
     <div style={{ fontFamily: 'system-ui, Arial', margin: 8 }}>
@@ -399,31 +367,30 @@ export default function Popup() {
               </div>
             ) : (
               <>
-              <button
-                onClick={() => setShowAuthForm(true)}
-                style={{
-                  padding: '6px 12px',
-                  backgroundColor: '#1a73e8',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                }}>
-                Sign In to Sync Translations
-              </button>
-            <p style={{ marginTop: '10px', fontSize: '14px', color: '#666' }}>
-              or{' '}
-              <a 
-                href="https://highlightranslator.com/auth" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                style={{ color: '#007bff', textDecoration: 'none' }}
-              >
-              create an account here
-              </a>
-            </p>
-            </>
+                <button
+                  onClick={() => setShowAuthForm(true)}
+                  style={{
+                    padding: '6px 12px',
+                    backgroundColor: '#1a73e8',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                  }}>
+                  Sign In to Sync Translations
+                </button>
+                <p style={{ marginTop: '10px', fontSize: '14px', color: '#666' }}>
+                  or{' '}
+                  <a
+                    href="https://highlightranslator.com/auth"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: '#007bff', textDecoration: 'none' }}>
+                    create an account here
+                  </a>
+                </p>
+              </>
             )}
           </div>
         )}
@@ -482,7 +449,7 @@ export default function Popup() {
         <option value="VI">Vietnamese</option>
       </select>
 
-      <h1 style={{ fontSize: 16, margin: '6px 0 12px 0' }}>Saved translations</h1>
+      <h1 style={{ fontSize: 16, margin: '6px 0 12px 0' }}>Saved translations ({items.length})</h1>
 
       <button
         onClick={openFlashcards}
@@ -541,8 +508,8 @@ export default function Popup() {
                     characterUsage.used / characterUsage.limit > 0.9
                       ? '#ff4444'
                       : characterUsage.used / characterUsage.limit > 0.7
-                      ? '#ffa500'
-                      : '#1a73e8',
+                        ? '#ffa500'
+                        : '#1a73e8',
                   transition: 'width 0.3s ease',
                 }}
               />
@@ -554,9 +521,7 @@ export default function Popup() {
             </div>
           </>
         ) : (
-          <div style={{ fontSize: 11, color: '#666', marginTop: 4, textAlign: 'center' }}>
-            Loading usage data...
-          </div>
+          <div style={{ fontSize: 11, color: '#666', marginTop: 4, textAlign: 'center' }}>Loading usage data...</div>
         )}
       </div>
 
