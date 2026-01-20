@@ -31,6 +31,30 @@ const CHAR_LIMITS = {
 
 // Simple in-memory cache
 const cache: Record<string, string> = {};
+const SUBSCRIPTION_CACHE_TTL_MS = 5 * 60 * 1000;
+let subscriptionCache: { value: SubscriptionResponse; ts: number } | null = null;
+
+let settingsCache = { enabled: true, targetLang: DEFAULT_TARGET_LANG };
+let settingsLoaded = false;
+
+async function loadSettingsCache(): Promise<void> {
+  const res = await chrome.storage.local.get({ enabled: true, targetLang: DEFAULT_TARGET_LANG });
+  settingsCache = {
+    enabled: !!res.enabled,
+    targetLang: (res.targetLang || DEFAULT_TARGET_LANG).toLowerCase(),
+  };
+  settingsLoaded = true;
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.enabled) {
+    settingsCache.enabled = !!changes.enabled.newValue;
+  }
+  if (changes.targetLang) {
+    settingsCache.targetLang = (changes.targetLang.newValue || DEFAULT_TARGET_LANG).toLowerCase();
+  }
+});
 
 // Types
 interface TranslationMessage {
@@ -347,13 +371,14 @@ async function checkSupabaseCache(text: string, targetLang: string): Promise<str
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (error) {
       console.log('No cached translation in Supabase:', error.message);
       return null;
     }
 
+    if (!data) return null;
     return data.translation;
   } catch (err) {
     console.error('Supabase cache check error:', err);
@@ -370,6 +395,7 @@ async function handleSignIn(email: string, password: string, remember: boolean =
     });
 
     if (error) throw error;
+    subscriptionCache = null;
 
     // Store session data for persistence
     if (remember && data.session) {
@@ -398,6 +424,7 @@ async function handleSignOut(): Promise<AuthResponse> {
     if (error) throw error;
 
     await clearStoredSessionData();
+    subscriptionCache = null;
     return { success: true };
   } catch (error) {
     console.error('Sign out error:', error);
@@ -458,6 +485,10 @@ async function handleRefreshSession(): Promise<AuthResponse> {
 // Check subscription status
 async function checkSubscription(): Promise<SubscriptionResponse> {
   try {
+    if (subscriptionCache && Date.now() - subscriptionCache.ts < SUBSCRIPTION_CACHE_TTL_MS) {
+      return subscriptionCache.value;
+    }
+
     const session = await getCurrentSession();
     console.log('checkSubscription - session exists:', !!session);
     
@@ -484,12 +515,14 @@ async function checkSubscription(): Promise<SubscriptionResponse> {
 
     const data = await response.json();
     console.log('checkSubscription - response data:', data);
-    return {
+    const result = {
       success: true,
       subscribed: data.subscribed || false,
       productId: data.productId,
       subscriptionEnd: data.subscriptionEnd,
     };
+    subscriptionCache = { value: result, ts: Date.now() };
+    return result;
   } catch (error) {
     console.error('Error checking subscription:', error);
     return { success: false, error: 'Failed to check subscription' };
@@ -631,8 +664,12 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (message.type === 'translate') {
-      chrome.storage.local.get({ enabled: true, targetLang: DEFAULT_TARGET_LANG }, async res => {
-        if (!res.enabled) {
+      (async () => {
+        if (!settingsLoaded) {
+          await loadSettingsCache();
+        }
+
+        if (!settingsCache.enabled) {
           sendResponse({ error: 'Extension is disabled' });
           return;
         }
@@ -643,7 +680,7 @@ chrome.runtime.onMessage.addListener(
           return;
         }
 
-        const targetLang = (res.targetLang || DEFAULT_TARGET_LANG).toLowerCase();
+        const targetLang = settingsCache.targetLang || DEFAULT_TARGET_LANG;
         const pageUrl = message.url || sender.tab?.url || '';
 
         // Extract highlighted word and context
@@ -654,18 +691,17 @@ chrome.runtime.onMessage.addListener(
 
         // Check in-memory cache first
         if (cache[cacheKey]) {
-          // Save main flashcard with context
-          await saveTranslation(
+          const cachedTranslation = cache[cacheKey];
+          sendResponse({ translation: cachedTranslation, fromCache: true });
+          void saveTranslation(
             highlightedWord, 
-            cache[cacheKey], 
+            cachedTranslation, 
             pageUrl, 
             targetLang, 
             contextText,
             'auto',
             targetLang
           );
-
-          sendResponse({ translation: cache[cacheKey], fromCache: true });
           return;
         }
 
@@ -673,9 +709,8 @@ chrome.runtime.onMessage.addListener(
         const supabaseCachedTranslation = await checkSupabaseCache(highlightedWord, targetLang);
         if (supabaseCachedTranslation) {
           cache[cacheKey] = supabaseCachedTranslation;
-          
-          // Save with context when restoring from cache
-          await saveTranslation(
+          sendResponse({ translation: supabaseCachedTranslation, fromCache: true });
+          void saveTranslation(
             highlightedWord, 
             supabaseCachedTranslation, 
             pageUrl, 
@@ -684,8 +719,6 @@ chrome.runtime.onMessage.addListener(
             'auto',
             targetLang
           );
-          
-          sendResponse({ translation: supabaseCachedTranslation, fromCache: true });
           return;
         }
 
@@ -708,24 +741,40 @@ chrome.runtime.onMessage.addListener(
 
             if (API_KEY && API_KEY.trim() !== '' && API_KEY !== 'undefined') {
               const url = 'https://api-free.deepl.com/v2/translate';
-              const params = new URLSearchParams();
-              params.append('auth_key', API_KEY.trim());
-              params.append('text', highlightedWord);  // Translate the word only
-              params.append('target_lang', targetLang.toUpperCase());
+              const payload = {
+                text: [highlightedWord], // Translate the word only
+                target_lang: targetLang.toUpperCase(),
+              };
 
               const resp = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: params.toString(),
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `DeepL-Auth-Key ${API_KEY.trim()}`,
+                },
+                body: JSON.stringify(payload),
               });
 
-              const data = await resp.json();
+              const raw = await resp.text();
+              let data: any = null;
+              try {
+                data = raw ? JSON.parse(raw) : null;
+              } catch (parseErr) {
+                console.error('DeepL response parse error:', parseErr, 'raw:', raw);
+              }
+
+              if (!resp.ok) {
+                console.error('DeepL HTTP error:', resp.status, resp.statusText, data || raw);
+                sendResponse({ error: `DeepL error ${resp.status}` });
+                return;
+              }
               
               // Extract detected language
-              if (data.translations?.length > 0) {
+              if (data?.translations?.length > 0) {
                 translation = data.translations[0].text;
                 detectedSourceLang = data.translations[0].detected_source_language || 'auto';
               } else {
+                console.error('DeepL response missing translations:', data || raw);
                 translation = '[translation error]';
               }
 
@@ -733,13 +782,13 @@ chrome.runtime.onMessage.addListener(
               cache[cacheKey] = safeTranslation;
 
               // Increment character usage for new translation
-              const incrementSuccess = await incrementCharacterUsage(charCount);
-              if (!incrementSuccess) {
-                console.warn('Character limit exceeded, but translation already completed');
-              }
-
-              // Save with the captured languages
-              await saveTranslation(
+              sendResponse({ translation: safeTranslation });
+              void incrementCharacterUsage(charCount).then(incrementSuccess => {
+                if (!incrementSuccess) {
+                  console.warn('Character limit exceeded, but translation already completed');
+                }
+              });
+              void saveTranslation(
                 highlightedWord, 
                 safeTranslation, 
                 pageUrl, 
@@ -748,8 +797,6 @@ chrome.runtime.onMessage.addListener(
                 detectedSourceLang,
                 targetLang
               );
-              
-              sendResponse({ translation: safeTranslation });
             } 
             else {
               // Handle case where API_KEY is not available
@@ -761,7 +808,7 @@ chrome.runtime.onMessage.addListener(
             sendResponse({ translation: '[error]' });
           }
         })();
-      });
+      })();
 
       return true;
     }
@@ -786,6 +833,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 // Initialize auth state
 (async () => {
   console.log('Initializing auth state...');
+  void loadSettingsCache();
   const { rememberMe } = await chrome.storage.local.get('rememberMe');
   
   if (rememberMe) {

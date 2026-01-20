@@ -36,7 +36,6 @@ export default function Popup() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [showAuthForm, setShowAuthForm] = useState(false);
-  const [rememberMe, setRememberMe] = useState(false);
   const [subscription, setSubscription] = useState<SubscriptionStatus | null>(null);
   const [characterUsage, setCharacterUsage] = useState<CharacterUsage | null>(null);
 
@@ -151,7 +150,7 @@ export default function Popup() {
       action: 'signin',
       email: authEmail,
       password: authPassword,
-      remember: rememberMe,
+      remember: true,
     });
     setLoading(false);
 
@@ -367,15 +366,6 @@ export default function Popup() {
                     fontSize: 12,
                   }}
                 />
-                <label style={{ display: 'flex', alignItems: 'center', marginBottom: '6px', fontSize: 12 }}>
-                  <input
-                    type="checkbox"
-                    checked={rememberMe}
-                    onChange={e => setRememberMe(e.target.checked)}
-                    style={{ marginRight: '6px' }}
-                  />
-                  Remember me
-                </label>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <button
                     onClick={handleSignIn}
