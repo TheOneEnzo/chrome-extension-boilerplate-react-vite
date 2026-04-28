@@ -2,6 +2,16 @@
 // Runs in the page. Detects text selection and requests translation from the background service worker.
 let tooltip: HTMLDivElement | null = null;
 let lastSelection: string = '';
+let translationCharLimit = 50;
+
+chrome.storage.local.get({ translationCharLimit: 50 }, res => {
+  translationCharLimit = Number(res.translationCharLimit) || 50;
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.translationCharLimit) return;
+  translationCharLimit = Number(changes.translationCharLimit.newValue) || 50;
+});
 
 const removeTooltip = (): void => {
   if (tooltip) {
@@ -38,9 +48,8 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
     return;
   }
   console.log(selectedText);
-  // --- NEW: Truncate to 10 characters max ---
-  if (selectedText.length > 50) {
-    selectedText = selectedText.substring(0, 50);
+  if (selectedText.length > translationCharLimit) {
+    selectedText = selectedText.substring(0, translationCharLimit);
     console.log(selectedText);
   }
 

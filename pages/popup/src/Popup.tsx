@@ -27,10 +27,15 @@ type CharacterUsage = {
   limit: number;
 };
 
+const DEFAULT_TRANSLATION_CHAR_LIMIT = 50;
+const MIN_TRANSLATION_CHAR_LIMIT = 1;
+const MAX_TRANSLATION_CHAR_LIMIT = 1000;
+
 export default function Popup() {
-  const [items, setItems] = useState<TranslationItem[]>([]);
+  const [, setItems] = useState<TranslationItem[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [targetLang, setTargetLang] = useState('EN-US');
+  const [translationCharLimit, setTranslationCharLimit] = useState(DEFAULT_TRANSLATION_CHAR_LIMIT);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
@@ -53,6 +58,9 @@ export default function Popup() {
 
     chrome.storage.local.get({ enabled: true }, res => setEnabled(res.enabled));
     chrome.storage.local.get({ targetLang: 'EN-US' }, res => setTargetLang(res.targetLang));
+    chrome.storage.local.get({ translationCharLimit: DEFAULT_TRANSLATION_CHAR_LIMIT }, res => {
+      setTranslationCharLimit(Number(res.translationCharLimit) || DEFAULT_TRANSLATION_CHAR_LIMIT);
+    });
 
     // Listen for Supabase changes from background
     chrome.runtime.onMessage.addListener(handleBackgroundMessage);
@@ -253,13 +261,67 @@ export default function Popup() {
     setTargetLang(lang);
     chrome.storage.local.set({ targetLang: lang });
   };
+  const changeTranslationCharLimit = (value: string) => {
+    const parsedValue = Number.parseInt(value, 10);
+    const nextLimit = Number.isNaN(parsedValue)
+      ? DEFAULT_TRANSLATION_CHAR_LIMIT
+      : Math.min(Math.max(parsedValue, MIN_TRANSLATION_CHAR_LIMIT), MAX_TRANSLATION_CHAR_LIMIT);
+
+    setTranslationCharLimit(nextLimit);
+    chrome.storage.local.set({ translationCharLimit: nextLimit });
+  };
 
   const openFlashcards = () => {
     window.open('https://highlightranslator.com/flashcards', '_blank');
   };
 
+  const openPricing = () => {
+    window.open('https://highlightranslator.com/pricing', '_blank');
+  };
+
   return (
     <div style={{ fontFamily: 'system-ui, Arial', margin: 8 }}>
+      {!user && (
+        <div
+          style={{
+            margin: '-8px -8px 14px -8px',
+            padding: '14px 12px',
+            backgroundColor: '#f5f8ff',
+            borderBottom: '1px solid #d8e6ff',
+            color: '#1f2937',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            overflow: 'hidden',
+          }}>
+          <div style={{ minWidth: 0 }}>
+            <p style={{ margin: '0 0 4px 0', fontSize: 14, fontWeight: 700, lineHeight: 1.25 }}>
+              Need more translation characters?
+            </p>
+            <p style={{ margin: 0, fontSize: 11, lineHeight: 1.35, color: '#5f6368' }}>
+              Create an account and sign in to get a higher monthly limit.
+            </p>
+          </div>
+          <button
+            onClick={openPricing}
+            style={{
+              flexShrink: 0,
+              padding: '7px 11px',
+              backgroundColor: '#1a73e8',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: 0,
+            }}>
+            Pricing
+          </button>
+        </div>
+      )}
+
       {/* Authentication Section */}
       <div style={{ marginBottom: 15, padding: 10, borderBottom: '1px solid #eee' }}>
         {user ? (
@@ -449,7 +511,33 @@ export default function Popup() {
         <option value="VI">Vietnamese</option>
       </select>
 
-      <h1 style={{ fontSize: 16, margin: '6px 0 12px 0' }}>Saved translations ({items.length})</h1>
+      <div style={{ marginBottom: 12, padding: 10, backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+        <label
+          htmlFor="translation-char-limit"
+          style={{ display: 'block', marginBottom: 5, fontSize: 12, fontWeight: 'bold' }}>
+          Characters per translation
+        </label>
+        <input
+          id="translation-char-limit"
+          type="number"
+          min={MIN_TRANSLATION_CHAR_LIMIT}
+          max={MAX_TRANSLATION_CHAR_LIMIT}
+          value={translationCharLimit}
+          onChange={e => changeTranslationCharLimit(e.target.value)}
+          style={{
+            width: '100%',
+            boxSizing: 'border-box',
+            padding: '6px',
+            border: '1px solid #ddd',
+            borderRadius: '4px',
+            fontSize: 12,
+          }}
+        />
+        <p style={{ margin: '6px 0 0 0', fontSize: 11, lineHeight: 1.35, color: '#666' }}>
+          This controls how many selected characters are sent for one translation. Lower limits keep translations short
+          and use fewer monthly characters; higher limits allow longer phrases.
+        </p>
+      </div>
 
       <button
         onClick={openFlashcards}
