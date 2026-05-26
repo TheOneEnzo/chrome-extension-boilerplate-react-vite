@@ -47,10 +47,8 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
     lastSelection = '';
     return;
   }
-  console.log(selectedText);
   if (selectedText.length > translationCharLimit) {
     selectedText = selectedText.substring(0, translationCharLimit);
-    console.log(selectedText);
   }
 
   // Avoid duplicate requests

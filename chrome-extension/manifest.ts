@@ -4,9 +4,10 @@ const manifest = {
   manifest_version: 3,
   default_locale: 'en',
   name: 'Highlight Translator',
-  version: '2.6.1',
+  version: '2.6.2',
   description: 'Highlight any text to translate instantly and save for flashcards.',
   permissions: ['storage'],
+  host_permissions: ['https://api-free.deepl.com/*', 'https://bivafzwsqftbpnoomcyv.supabase.co/*'],
   background: {
     service_worker: 'background.js',
     type: 'module',

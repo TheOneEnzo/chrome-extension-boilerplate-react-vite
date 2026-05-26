@@ -83,6 +83,12 @@ interface SubscriptionMessage {
   action: 'check' | 'getUsage';
 }
 
+interface FlashcardsMessage {
+  type: 'flashcards';
+  action: 'list' | 'delete' | 'clearAll';
+  id?: string;
+}
+
 interface SubscriptionResponse {
   success: boolean;
   subscribed?: boolean;
@@ -95,6 +101,12 @@ interface UsageResponse {
   success: boolean;
   used?: number;
   limit?: number;
+  error?: string;
+}
+
+interface FlashcardsResponse {
+  success: boolean;
+  data?: any[];
   error?: string;
 }
 
@@ -147,6 +159,12 @@ async function getCurrentSession() {
 async function getCurrentUserId(): Promise<string | null> {
   const session = await getCurrentSession();
   return session?.user?.id || null;
+}
+
+async function getAuthenticatedUserId(): Promise<string | null> {
+  const isAuthenticated = await ensureAuthenticated();
+  if (!isAuthenticated) return null;
+  return await getCurrentUserId();
 }
 
 // Check if session is expired
@@ -243,6 +261,11 @@ async function refreshSessionIfNeeded() {
     }
 
     // Check if session will expire soon (within 5 minutes)
+    if (!session.expires_at) {
+      console.log('Session has no expiry, skipping refresh');
+      return;
+    }
+
     const now = Math.floor(Date.now() / 1000);
     const expiresSoon = session.expires_at - now < 300; // 5 minutes
 
@@ -308,14 +331,6 @@ async function saveTranslation(
     // Use targetLang if translationLang is empty
     const finalTranslationLang = translationLang || targetLang;
 
-    console.log('Saving translation:', {
-      original,
-      translation,
-      originalLang,
-      translationLang: finalTranslationLang,
-      context: contextText,
-    });
-
     // Insert with insert on (user_id, original)
     const { data, error } = await supabase
       .from('flashcards')
@@ -334,7 +349,7 @@ async function saveTranslation(
     if (error) {
       console.error('Supabase insert error:', error);
     } else {
-      console.log('Saved translation to Supabase:', data);
+      console.log('Saved translation to Supabase:', data?.length ?? 0);
     }
   } catch (err) {
     console.error('saveTranslation error:', err);
@@ -607,9 +622,84 @@ async function getUsageInfo(): Promise<UsageResponse> {
   }
 }
 
+async function listFlashcards(): Promise<FlashcardsResponse> {
+  try {
+    const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const { data, error } = await supabase
+      .from('flashcards')
+      .select('id, original, translation, date, url, original_language, translation_language')
+      .eq('user_id', userId)
+      .order('date', { ascending: false });
+
+    if (error) {
+      console.error('Flashcards list error:', error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, data: data ?? [] };
+  } catch (error) {
+    console.error('Flashcards list error:', error);
+    return { success: false, error: 'Failed to load flashcards' };
+  }
+}
+
+async function deleteFlashcard(id?: string): Promise<FlashcardsResponse> {
+  try {
+    if (!id) {
+      return { success: false, error: 'Missing flashcard id' };
+    }
+
+    const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const { error } = await supabase.from('flashcards').delete().eq('id', id).eq('user_id', userId);
+
+    if (error) {
+      console.error('Flashcard delete error:', error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Flashcard delete error:', error);
+    return { success: false, error: 'Failed to delete flashcard' };
+  }
+}
+
+async function clearFlashcards(): Promise<FlashcardsResponse> {
+  try {
+    const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const { error } = await supabase.from('flashcards').delete().eq('user_id', userId);
+
+    if (error) {
+      console.error('Flashcards clear error:', error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Flashcards clear error:', error);
+    return { success: false, error: 'Failed to clear flashcards' };
+  }
+}
+
 // Main message listener
 chrome.runtime.onMessage.addListener(
-  (message: TranslationMessage | AuthMessage | SubscriptionMessage, sender, sendResponse: (response?: any) => void) => {
+  (
+    message: TranslationMessage | AuthMessage | SubscriptionMessage | FlashcardsMessage,
+    sender,
+    sendResponse: (response?: any) => void,
+  ) => {
     // Handle authentication messages
     if (message.type === 'auth') {
       (async () => {
@@ -653,6 +743,29 @@ chrome.runtime.onMessage.addListener(
           case 'getUsage': {
             const usageResult = await getUsageInfo();
             sendResponse(usageResult);
+            break;
+          }
+        }
+      })();
+      return true;
+    }
+
+    if (message.type === 'flashcards') {
+      (async () => {
+        switch (message.action) {
+          case 'list': {
+            const result = await listFlashcards();
+            sendResponse(result);
+            break;
+          }
+          case 'delete': {
+            const result = await deleteFlashcard(message.id);
+            sendResponse(result);
+            break;
+          }
+          case 'clearAll': {
+            const result = await clearFlashcards();
+            sendResponse(result);
             break;
           }
         }
@@ -807,6 +920,8 @@ chrome.runtime.onMessage.addListener(
 
       return true;
     }
+
+    return false;
   },
 );
 
