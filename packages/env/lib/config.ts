@@ -8,4 +8,4 @@ export const baseEnv =
 export const dynamicEnvValues = {
   CEB_NODE_ENV: baseEnv.CEB_DEV === 'true' ? 'development' : 'production',
   CEB_API_KEY: baseEnv.CEB_API_KEY || '', // Use CEB_ prefix
-} as const;console.log('Base env:', baseEnv);
+} as const;

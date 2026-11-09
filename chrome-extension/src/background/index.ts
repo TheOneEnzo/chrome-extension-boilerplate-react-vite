@@ -244,7 +244,7 @@ async function refreshSessionIfNeeded() {
 
     // Check if session will expire soon (within 5 minutes)
     const now = Math.floor(Date.now() / 1000);
-    const expiresSoon = session.expires_at - now < 300; // 5 minutes
+    const expiresSoon = (session.expires_at ?? 0) - now < 300; // 5 minutes
 
     if (expiresSoon) {
       console.log('Session expires soon, refreshing...');
@@ -807,6 +807,9 @@ chrome.runtime.onMessage.addListener(
 
       return true;
     }
+
+    // Unknown message type: no async response
+    return false;
   },
 );
 
