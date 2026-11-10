@@ -29,19 +29,46 @@ const CHAR_LIMITS = {
   PREMIUM: 20000,
 };
 
-// Simple in-memory cache
-const cache: Record<string, string> = {};
+// Simple in-memory cache. sourceLang is DeepL's detected_source_language (uppercase) or 'auto'.
+interface CachedTranslation {
+  translation: string;
+  sourceLang: string;
+}
+const cache: Record<string, CachedTranslation> = {};
 const SUBSCRIPTION_CACHE_TTL_MS = 5 * 60 * 1000;
 let subscriptionCache: { value: SubscriptionResponse; ts: number } | null = null;
 
-let settingsCache = { enabled: true, targetLang: DEFAULT_TARGET_LANG };
+interface SettingsCache {
+  enabled: boolean;
+  targetLang: string;
+  // Lowercase base language codes (e.g. ['de', 'fr']). Empty = translate from any language.
+  sourceLangs: string[];
+  // Skip selections that are already written in the target language.
+  skipTargetLang: boolean;
+}
+
+const SETTINGS_DEFAULTS = {
+  enabled: true,
+  targetLang: DEFAULT_TARGET_LANG,
+  sourceLangs: [] as string[],
+  skipTargetLang: true,
+};
+
+let settingsCache: SettingsCache = { ...SETTINGS_DEFAULTS };
 let settingsLoaded = false;
 
+function normalizeSourceLangs(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(v => normalizeLangCode(String(v))).filter((v): v is string => !!v);
+}
+
 async function loadSettingsCache(): Promise<void> {
-  const res = await chrome.storage.local.get({ enabled: true, targetLang: DEFAULT_TARGET_LANG });
+  const res = await chrome.storage.local.get(SETTINGS_DEFAULTS);
   settingsCache = {
     enabled: !!res.enabled,
     targetLang: (res.targetLang || DEFAULT_TARGET_LANG).toLowerCase(),
+    sourceLangs: normalizeSourceLangs(res.sourceLangs),
+    skipTargetLang: res.skipTargetLang !== false,
   };
   settingsLoaded = true;
 }
@@ -54,7 +81,101 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.targetLang) {
     settingsCache.targetLang = (changes.targetLang.newValue || DEFAULT_TARGET_LANG).toLowerCase();
   }
+  if (changes.sourceLangs) {
+    settingsCache.sourceLangs = normalizeSourceLangs(changes.sourceLangs.newValue);
+  }
+  if (changes.skipTargetLang) {
+    settingsCache.skipTargetLang = changes.skipTargetLang.newValue !== false;
+  }
 });
+
+// --- Language filtering ---------------------------------------------------
+// Users often leave the extension on while highlighting text in their own language,
+// which used to burn their monthly characters. We work out which language a selection
+// is in and only translate (and charge for) the languages the user wants.
+
+// Map Chrome (CLD) / DeepL language codes to one lowercase base code.
+const LANG_ALIASES: Record<string, string> = {
+  no: 'nb',
+  nn: 'nb',
+  iw: 'he',
+  in: 'id',
+};
+
+function normalizeLangCode(code: string | null | undefined): string | null {
+  if (!code) return null;
+  const base = code.trim().toLowerCase().split(/[-_]/)[0];
+  if (!base || base === 'auto' || base === 'und') return null;
+  return LANG_ALIASES[base] || base;
+}
+
+interface LocalDetection {
+  lang: string | null;
+  reliable: boolean;
+}
+
+// Free, on-device detection. Reliable for phrases and sentences, rarely for single words.
+async function detectLocally(text: string | undefined): Promise<LocalDetection> {
+  if (!text || !text.trim()) return { lang: null, reliable: false };
+  try {
+    const result = await chrome.i18n.detectLanguage(text);
+    const top = result?.languages?.[0];
+    const lang = normalizeLangCode(top?.language);
+    return { lang, reliable: !!result?.isReliable && !!lang && (top?.percentage ?? 0) >= 70 };
+  } catch (err) {
+    console.warn('Local language detection failed:', err);
+    return { lang: null, reliable: false };
+  }
+}
+
+// Source languages DeepL accepts in `source_lang` (lowercase base codes).
+const DEEPL_SOURCE_LANGS = new Set([
+  'ar',
+  'bg',
+  'cs',
+  'da',
+  'de',
+  'el',
+  'en',
+  'es',
+  'et',
+  'fi',
+  'fr',
+  'he',
+  'hu',
+  'id',
+  'it',
+  'ja',
+  'ko',
+  'lt',
+  'lv',
+  'nb',
+  'nl',
+  'pl',
+  'pt',
+  'ro',
+  'ru',
+  'sk',
+  'sl',
+  'sv',
+  'th',
+  'tr',
+  'uk',
+  'vi',
+  'zh',
+]);
+
+function hasLanguageFilter(settings: SettingsCache): boolean {
+  return settings.skipTargetLang || settings.sourceLangs.length > 0;
+}
+
+// Unknown languages are allowed: we never block a translation we can't classify.
+function isLangAllowed(lang: string | null, settings: SettingsCache): boolean {
+  if (!lang) return true;
+  if (settings.skipTargetLang && lang === normalizeLangCode(settings.targetLang)) return false;
+  if (settings.sourceLangs.length > 0 && !settings.sourceLangs.includes(lang)) return false;
+  return true;
+}
 
 // Types
 interface TranslationMessage {
@@ -244,7 +365,7 @@ async function refreshSessionIfNeeded() {
 
     // Check if session will expire soon (within 5 minutes)
     const now = Math.floor(Date.now() / 1000);
-    const expiresSoon = session.expires_at - now < 300; // 5 minutes
+    const expiresSoon = (session.expires_at ?? 0) - now < 300; // 5 minutes
 
     if (expiresSoon) {
       console.log('Session expires soon, refreshing...');
@@ -342,7 +463,7 @@ async function saveTranslation(
 }
 
 // Helper: check Supabase flashcards table for existing translation
-async function checkSupabaseCache(text: string, targetLang: string): Promise<string | null> {
+async function checkSupabaseCache(text: string, targetLang: string): Promise<CachedTranslation | null> {
   try {
     const isAuthenticated = await ensureAuthenticated();
 
@@ -360,7 +481,7 @@ async function checkSupabaseCache(text: string, targetLang: string): Promise<str
 
     const { data, error } = await supabase
       .from('flashcards')
-      .select('translation')
+      .select('translation, original_language')
       .eq('original', text)
       .eq('user_id', userId)
       .eq('translation_language', targetLang)
@@ -373,8 +494,8 @@ async function checkSupabaseCache(text: string, targetLang: string): Promise<str
       return null;
     }
 
-    if (!data) return null;
-    return data.translation;
+    if (!data || !data.translation) return null;
+    return { translation: data.translation, sourceLang: data.original_language || 'auto' };
   } catch (err) {
     console.error('Supabase cache check error:', err);
     return null;
@@ -607,6 +728,212 @@ async function getUsageInfo(): Promise<UsageResponse> {
   }
 }
 
+type TranslateResponse =
+  | { translation: string; fromCache?: boolean }
+  | { skipped: 'language'; detectedLanguage?: string }
+  | { error: string };
+
+// Ask DeepL for a translation. The surrounding sentence goes in `context`, which DeepL
+// does not bill for, and which improves both the translation and language detection.
+async function translateWithDeepL(
+  text: string,
+  targetLang: string,
+  contextText?: string,
+  sourceLang?: string,
+): Promise<CachedTranslation | { error: string }> {
+  const payload: Record<string, unknown> = {
+    text: [text],
+    target_lang: targetLang.toUpperCase(),
+  };
+  if (contextText && contextText !== text) {
+    payload.context = contextText;
+  }
+  if (sourceLang) {
+    payload.source_lang = sourceLang.toUpperCase();
+  }
+
+  const resp = await fetch('https://api-free.deepl.com/v2/translate', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `DeepL-Auth-Key ${API_KEY.trim()}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const raw = await resp.text();
+  let data: any = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch (parseErr) {
+    console.error('DeepL response parse error:', parseErr, 'raw:', raw);
+  }
+
+  if (!resp.ok) {
+    console.error('DeepL HTTP error:', resp.status, resp.statusText, data || raw);
+    return { error: `DeepL error ${resp.status}` };
+  }
+
+  if (data?.translations?.length > 0) {
+    return {
+      translation: data.translations[0].text ?? '[null translation]',
+      sourceLang: data.translations[0].detected_source_language || 'auto',
+    };
+  }
+
+  console.error('DeepL response missing translations:', data || raw);
+  return { translation: '[translation error]', sourceLang: 'auto' };
+}
+
+async function handleTranslate(
+  message: TranslationMessage,
+  sender: chrome.runtime.MessageSender,
+): Promise<TranslateResponse> {
+  if (!settingsLoaded) {
+    await loadSettingsCache();
+  }
+  const settings = settingsCache;
+
+  if (!settings.enabled) {
+    return { error: 'Extension is disabled' };
+  }
+
+  const text = (message.text || '').trim();
+  if (!text) {
+    return { translation: '' };
+  }
+
+  const targetLang = settings.targetLang || DEFAULT_TARGET_LANG;
+  const pageUrl = message.url || sender.tab?.url || '';
+
+  // Extract highlighted word and context
+  const highlightedWord = ((message as any).highlightedWord || text).trim();
+  const contextText: string | undefined = (message as any).highlightedWord ? text : undefined;
+
+  const cacheKey = `${highlightedWord}|${targetLang}`;
+  const filtering = hasLanguageFilter(settings);
+
+  // 1. Free on-device detection. If the selection itself is clearly in a language the
+  //    user doesn't want, stop here: no DeepL call, no characters used.
+  const wordDetection: LocalDetection = filtering
+    ? await detectLocally(highlightedWord)
+    : { lang: null, reliable: false };
+  if (filtering && wordDetection.reliable && !isLangAllowed(wordDetection.lang, settings)) {
+    return { skipped: 'language', detectedLanguage: wordDetection.lang ?? undefined };
+  }
+  const contextDetection: LocalDetection =
+    filtering && !wordDetection.reliable && contextText && contextText !== highlightedWord
+      ? await detectLocally(contextText)
+      : { lang: null, reliable: false };
+
+  // Single words can't be classified reliably on their own. Combine DeepL's detection
+  // (from the word plus its sentence) with on-device detection of the sentence, and let
+  // the translation through if either says it's a language the user wants.
+  // e.g. a German word quoted in an English sentence -> DeepL says DE -> allowed.
+  //      "also" on a German page -> the sentence is German -> allowed.
+  const passesFilter = (deeplSourceLang: string): boolean => {
+    if (!filtering || wordDetection.reliable) return true;
+    if (isLangAllowed(normalizeLangCode(deeplSourceLang), settings)) return true;
+    return contextDetection.reliable && isLangAllowed(contextDetection.lang, settings);
+  };
+  // A word that exists in several languages ("also", "die", "gift") can be read by DeepL as
+  // the wrong one, e.g. as English on a German page, which returns it untranslated. When
+  // DeepL's guess is a language the user doesn't want but the sentence is clearly one they
+  // do, translate it again as the sentence's language. That second lookup is on us.
+  const contextSourceOverride = (deeplSourceLang: string): string | null => {
+    if (!filtering || wordDetection.reliable || !contextDetection.reliable || !contextDetection.lang) return null;
+    if (isLangAllowed(normalizeLangCode(deeplSourceLang), settings)) return null;
+    if (!isLangAllowed(contextDetection.lang, settings) || !DEEPL_SOURCE_LANGS.has(contextDetection.lang)) return null;
+    return contextDetection.lang;
+  };
+  const skippedResponse = (lang: string): TranslateResponse => ({
+    skipped: 'language',
+    detectedLanguage: normalizeLangCode(lang) ?? undefined,
+  });
+
+  // 2. Cached translations are free for the user.
+  let cached: CachedTranslation | null = cache[cacheKey] ?? null;
+  if (!cached) {
+    cached = await checkSupabaseCache(highlightedWord, targetLang);
+    if (cached) cache[cacheKey] = cached;
+  }
+  if (cached && contextSourceOverride(cached.sourceLang)) {
+    // Cached under the wrong source language (see contextSourceOverride): fetch a corrected
+    // translation. The user isn't charged for our correction.
+    const forcedLang = contextSourceOverride(cached.sourceLang)!;
+    if (API_KEY && API_KEY.trim() !== '' && API_KEY !== 'undefined') {
+      const corrected = await translateWithDeepL(highlightedWord, targetLang, contextText, forcedLang);
+      if (!('error' in corrected)) {
+        cached = { translation: corrected.translation, sourceLang: forcedLang.toUpperCase() };
+        cache[cacheKey] = cached;
+      }
+    }
+  }
+  if (cached) {
+    if (!passesFilter(cached.sourceLang)) return skippedResponse(cached.sourceLang);
+    void saveTranslation(
+      highlightedWord,
+      cached.translation,
+      pageUrl,
+      targetLang,
+      contextText,
+      cached.sourceLang,
+      targetLang,
+    );
+    return { translation: cached.translation, fromCache: true };
+  }
+
+  // 3. New translation: make sure the user has characters left.
+  const charCount = highlightedWord.length;
+  const usage = await getCharacterUsage();
+  if (usage.used + charCount > usage.limit) {
+    return { error: `Character limit reached. You've used ${usage.used}/${usage.limit} characters this month.` };
+  }
+
+  if (!API_KEY || API_KEY.trim() === '' || API_KEY === 'undefined') {
+    return { error: 'API key not configured' };
+  }
+
+  let result = await translateWithDeepL(highlightedWord, targetLang, contextText);
+  if ('error' in result) return result;
+
+  const forcedLang = contextSourceOverride(result.sourceLang);
+  if (forcedLang) {
+    console.log(`DeepL read "${highlightedWord}" as ${result.sourceLang}; retranslating as ${forcedLang} from context`);
+    const corrected = await translateWithDeepL(highlightedWord, targetLang, contextText, forcedLang);
+    if (!('error' in corrected)) {
+      result = { translation: corrected.translation, sourceLang: forcedLang.toUpperCase() };
+    }
+  }
+
+  // Cache every result, including ones we skip, so highlighting the same text again
+  // doesn't call DeepL a second time.
+  cache[cacheKey] = result;
+
+  // 4. DeepL says it's a language the user didn't ask for: we paid for the lookup,
+  //    the user doesn't. Nothing is shown, saved or counted.
+  if (!passesFilter(result.sourceLang)) {
+    console.log('Skipping translation, detected language not wanted:', result.sourceLang);
+    return skippedResponse(result.sourceLang);
+  }
+
+  void incrementCharacterUsage(charCount).then(incrementSuccess => {
+    if (!incrementSuccess) {
+      console.warn('Character limit exceeded, but translation already completed');
+    }
+  });
+  void saveTranslation(
+    highlightedWord,
+    result.translation,
+    pageUrl,
+    targetLang,
+    contextText,
+    result.sourceLang,
+    targetLang,
+  );
+  return { translation: result.translation };
+}
+
 // Main message listener
 chrome.runtime.onMessage.addListener(
   (message: TranslationMessage | AuthMessage | SubscriptionMessage, sender, sendResponse: (response?: any) => void) => {
@@ -661,152 +988,17 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (message.type === 'translate') {
-      (async () => {
-        if (!settingsLoaded) {
-          await loadSettingsCache();
-        }
-
-        if (!settingsCache.enabled) {
-          sendResponse({ error: 'Extension is disabled' });
-          return;
-        }
-
-        const text = (message.text || '').trim();
-        if (!text) {
-          sendResponse({ translation: '' });
-          return;
-        }
-
-        const targetLang = settingsCache.targetLang || DEFAULT_TARGET_LANG;
-        const pageUrl = message.url || sender.tab?.url || '';
-
-        // Extract highlighted word and context
-        const highlightedWord = (message as any).highlightedWord || text;
-        const contextText = (message as any).highlightedWord ? text : undefined;
-
-        const cacheKey = `${highlightedWord}|${targetLang}`;
-
-        // Check in-memory cache first
-        if (cache[cacheKey]) {
-          const cachedTranslation = cache[cacheKey];
-          sendResponse({ translation: cachedTranslation, fromCache: true });
-          void saveTranslation(
-            highlightedWord,
-            cachedTranslation,
-            pageUrl,
-            targetLang,
-            contextText,
-            'auto',
-            targetLang,
-          );
-          return;
-        }
-
-        // Check Supabase cache
-        const supabaseCachedTranslation = await checkSupabaseCache(highlightedWord, targetLang);
-        if (supabaseCachedTranslation) {
-          cache[cacheKey] = supabaseCachedTranslation;
-          sendResponse({ translation: supabaseCachedTranslation, fromCache: true });
-          void saveTranslation(
-            highlightedWord,
-            supabaseCachedTranslation,
-            pageUrl,
-            targetLang,
-            contextText,
-            'auto',
-            targetLang,
-          );
-          return;
-        }
-
-        // If we get here, we need a new translation - check character limit
-        const charCount = highlightedWord.length;
-        const usage = await getCharacterUsage();
-
-        if (usage.used + charCount > usage.limit) {
-          sendResponse({
-            error: `Character limit reached. You've used ${usage.used}/${usage.limit} characters this month.`,
-          });
-          return;
-        }
-
-        // FIX: Translate ONLY the highlighted word, not the context
-        (async () => {
-          try {
-            let translation: string | null = null;
-            let detectedSourceLang = 'auto';
-
-            if (API_KEY && API_KEY.trim() !== '' && API_KEY !== 'undefined') {
-              const url = 'https://api-free.deepl.com/v2/translate';
-              const payload = {
-                text: [highlightedWord], // Translate the word only
-                target_lang: targetLang.toUpperCase(),
-              };
-
-              const resp = await fetch(url, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `DeepL-Auth-Key ${API_KEY.trim()}`,
-                },
-                body: JSON.stringify(payload),
-              });
-
-              const raw = await resp.text();
-              let data: any = null;
-              try {
-                data = raw ? JSON.parse(raw) : null;
-              } catch (parseErr) {
-                console.error('DeepL response parse error:', parseErr, 'raw:', raw);
-              }
-
-              if (!resp.ok) {
-                console.error('DeepL HTTP error:', resp.status, resp.statusText, data || raw);
-                sendResponse({ error: `DeepL error ${resp.status}` });
-                return;
-              }
-
-              // Extract detected language
-              if (data?.translations?.length > 0) {
-                translation = data.translations[0].text;
-                detectedSourceLang = data.translations[0].detected_source_language || 'auto';
-              } else {
-                console.error('DeepL response missing translations:', data || raw);
-                translation = '[translation error]';
-              }
-
-              const safeTranslation = translation ?? '[null translation]';
-              cache[cacheKey] = safeTranslation;
-
-              // Increment character usage for new translation
-              sendResponse({ translation: safeTranslation });
-              void incrementCharacterUsage(charCount).then(incrementSuccess => {
-                if (!incrementSuccess) {
-                  console.warn('Character limit exceeded, but translation already completed');
-                }
-              });
-              void saveTranslation(
-                highlightedWord,
-                safeTranslation,
-                pageUrl,
-                targetLang,
-                contextText,
-                detectedSourceLang,
-                targetLang,
-              );
-            } else {
-              // Handle case where API_KEY is not available
-              sendResponse({ error: 'API key not configured' });
-            }
-          } catch (err) {
-            console.error('Translation error', err);
-            sendResponse({ translation: '[error]' });
-          }
-        })();
-      })();
-
+      handleTranslate(message, sender)
+        .then(sendResponse)
+        .catch(err => {
+          console.error('Translation error', err);
+          sendResponse({ translation: '[error]' });
+        });
       return true;
     }
+
+    // Unknown message type: no async response
+    return false;
   },
 );
 

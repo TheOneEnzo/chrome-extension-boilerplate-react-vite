@@ -1,17 +1,50 @@
 // content.ts
 // Runs in the page. Detects text selection and requests translation from the background service worker.
+type TriggerMode = 'always' | 'modifier';
+
 let tooltip: HTMLDivElement | null = null;
 let lastSelection: string = '';
 let translationCharLimit = 50;
+let triggerMode: TriggerMode = 'always';
+// 'system' follows the OS; 'light' / 'dark' are set from the popup's theme button.
+let theme: 'system' | 'light' | 'dark' = 'system';
 
-chrome.storage.local.get({ translationCharLimit: 50 }, res => {
+const parseTriggerMode = (value: unknown): TriggerMode => (value === 'modifier' ? 'modifier' : 'always');
+const parseTheme = (value: unknown): typeof theme => (value === 'light' || value === 'dark' ? value : 'system');
+
+chrome.storage.local.get({ translationCharLimit: 50, triggerMode: 'always', theme: 'system' }, res => {
   translationCharLimit = Number(res.translationCharLimit) || 50;
+  triggerMode = parseTriggerMode(res.triggerMode);
+  theme = parseTheme(res.theme);
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local' || !changes.translationCharLimit) return;
-  translationCharLimit = Number(changes.translationCharLimit.newValue) || 50;
+  if (area !== 'local') return;
+  if (changes.translationCharLimit) {
+    translationCharLimit = Number(changes.translationCharLimit.newValue) || 50;
+  }
+  if (changes.triggerMode) {
+    triggerMode = parseTriggerMode(changes.triggerMode.newValue);
+  }
+  if (changes.theme) {
+    theme = parseTheme(changes.theme.newValue);
+  }
 });
+
+// Selections made while typing or editing (inputs, textareas, rich text editors) are
+// never meant to be translated.
+const isEditableTarget = (selection: Selection | null): boolean => {
+  const active = document.activeElement as HTMLElement | null;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+    return true;
+  }
+  const anchor = selection?.anchorNode;
+  const el = anchor instanceof HTMLElement ? anchor : anchor?.parentElement;
+  return !!el?.isContentEditable;
+};
+
+// Numbers, symbols and punctuation have nothing to translate.
+const hasLetters = (text: string): boolean => /\p{L}/u.test(text);
 
 const removeTooltip = (): void => {
   if (tooltip) {
@@ -25,7 +58,7 @@ const showTooltip = (text: string, rect: DOMRect | { top: number; left: number }
   removeTooltip();
 
   const div = document.createElement('div');
-  div.className = 'translation-tooltip';
+  div.className = theme === 'system' ? 'translation-tooltip' : `translation-tooltip ht-theme-${theme}`;
   div.innerText = text;
 
   const top = window.scrollY + Math.max(0, rect.top - 36);
@@ -41,17 +74,21 @@ document.addEventListener('mousedown', removeTooltip);
 
 document.addEventListener('mouseup', (ev: MouseEvent) => {
   const selection = window.getSelection();
-  let selectedText: string = selection?.toString().trim() ?? '';
+  const selectedText: string = selection?.toString().trim() ?? '';
 
   if (!selectedText) {
     lastSelection = '';
     return;
   }
-  console.log(selectedText);
-  if (selectedText.length > translationCharLimit) {
-    selectedText = selectedText.substring(0, translationCharLimit);
-    console.log(selectedText);
-  }
+
+  // Only translate on purpose: these are the usual ways regular highlighting (copying,
+  // selecting a paragraph, editing text) used to burn through the monthly characters.
+  if (triggerMode === 'modifier' && !ev.altKey) return;
+  if (isEditableTarget(selection)) return;
+  if (!hasLetters(selectedText)) return;
+  // Longer than the per-translation limit: almost always a paragraph being selected for
+  // another reason. Skip it instead of translating a cut-off fragment.
+  if (selectedText.length > translationCharLimit) return;
 
   // Avoid duplicate requests
   if (selectedText === lastSelection) return;
@@ -81,7 +118,7 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
         // Split into sentences
         const sentences = blockText.match(/[^.!?]+[.!?]+/g) || [blockText];
 
-        // Find the sentence containing the (now truncated) selection
+        // Find the sentence containing the selection
         const idx = sentences.findIndex(s => s.includes(selectedText));
 
         if (idx !== -1) {
@@ -94,7 +131,7 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
     }
   } catch (err) {
     console.error('Error grabbing context:', err);
-    contextText = selectedText; // fallback to truncated selection
+    contextText = selectedText; // fallback to the selection itself
   }
 
   // Optional: truncate context for tooltip/translation requests
@@ -104,7 +141,7 @@ document.addEventListener('mouseup', (ev: MouseEvent) => {
   chrome.runtime.sendMessage(
     {
       type: 'translate',
-      highlightedWord: selectedText, // The truncated word
+      highlightedWord: selectedText, // The selected word or phrase
       text: truncatedContext, // The surrounding context
       url: window.location.href,
     },

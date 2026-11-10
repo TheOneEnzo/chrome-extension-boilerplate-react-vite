@@ -12,3 +12,20 @@
   line-height: 1.3;
   pointer-events: none;
 }
+
+/* Light tooltip: chosen in the popup, or the system is light and no theme is forced. */
+.translation-tooltip.ht-theme-light {
+  background: #fff;
+  color: #17171c;
+  border: 1px solid #e5e5ea;
+  box-shadow: 0px 4px 16px rgba(16,16,24,0.14);
+}
+
+@media (prefers-color-scheme: light) {
+  .translation-tooltip:not(.ht-theme-dark) {
+    background: #fff;
+    color: #17171c;
+    border: 1px solid #e5e5ea;
+    box-shadow: 0px 4px 16px rgba(16,16,24,0.14);
+  }
+}
