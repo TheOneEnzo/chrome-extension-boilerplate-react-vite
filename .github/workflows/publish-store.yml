@@ -1,0 +1,86 @@
+name: Publish to Chrome Web Store
+
+# Push a tag like v2.7.0 (matching `version` in chrome-extension/manifest.ts)
+# to build, upload and submit the extension for review. See PUBLISHING.md.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      submit:
+        description: 'Submit for review after uploading (unchecked = upload a draft only)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chrome-web-store-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Optional: add required reviewers to this environment in
+    # Settings → Environments to get a manual approval step before publishing.
+    environment: chrome-web-store
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches manifest version
+        run: bash bash-scripts/check_release_version.sh
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+
+      - name: Write .env from secrets
+        env:
+          CEB_API_KEY: ${{ secrets.CEB_API_KEY }}
+          CEB_SUPABASE_KEY: ${{ secrets.CEB_SUPABASE_KEY }}
+        run: |
+          if [ -z "$CEB_API_KEY" ] || [ -z "$CEB_SUPABASE_KEY" ]; then
+            echo "::error::Secrets CEB_API_KEY and CEB_SUPABASE_KEY must both be set"
+            exit 1
+          fi
+          {
+            echo "# THOSE VALUES ARE EDITABLE ONLY VIA CLI"
+            echo "CLI_CEB_DEV=false"
+            echo "CLI_CEB_FIREFOX=false"
+            echo ""
+            echo "# THOSE VALUES ARE EDITABLE"
+            echo "CEB_API_KEY=$CEB_API_KEY"
+            echo "CEB_SUPABASE_KEY=$CEB_SUPABASE_KEY"
+          } > .env
+
+      - run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build zip
+        run: pnpm zip
+
+      - name: Check built version
+        run: bash bash-scripts/check_release_version.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ github.ref_name }}
+          path: dist-zip/*.zip
+          if-no-files-found: error
+
+      - name: Upload and submit to Chrome Web Store
+        env:
+          CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          CWS_PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          SUBMIT: ${{ github.event_name == 'push' || inputs.submit }}
+        run: |
+          if [ "$SUBMIT" = "true" ]; then
+            bash bash-scripts/publish_store.sh --skip-build
+          else
+            bash bash-scripts/publish_store.sh --skip-build --upload-only
+          fi
