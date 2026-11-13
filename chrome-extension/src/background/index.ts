@@ -674,9 +674,53 @@ function getCurrentMonthKey(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
+// Admin-granted usage resets live in Supabase `usage_resets`. Poll at most every 5 minutes.
+const USAGE_RESET_CHECK_TTL_MS = 5 * 60 * 1000;
+let lastUsageResetCheck = 0;
+
+// If an admin granted a reset newer than the last one applied in this browser,
+// set this month's usage back to 0. Errors are ignored so translation keeps working.
+async function applyPendingUsageReset(): Promise<void> {
+  if (Date.now() - lastUsageResetCheck < USAGE_RESET_CHECK_TTL_MS) return;
+
+  const { rememberMe } = await chrome.storage.local.get('rememberMe');
+  if (!rememberMe) return;
+
+  const userId = await getCurrentUserId();
+  if (!userId) return;
+
+  try {
+    const { data, error } = await supabase
+      .from('usage_resets')
+      .select('created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throw error;
+    lastUsageResetCheck = Date.now();
+
+    const latest: string | undefined = data?.[0]?.created_at;
+    if (!latest) return;
+
+    const { charUsageResetApplied } = await chrome.storage.local.get('charUsageResetApplied');
+    const applied = charUsageResetApplied?.userId === userId ? charUsageResetApplied.resetAt : null;
+    if (applied && new Date(applied).getTime() >= new Date(latest).getTime()) return;
+
+    console.log('Applying usage reset granted at', latest);
+    await chrome.storage.local.set({
+      charUsage: 0,
+      charUsageMonth: getCurrentMonthKey(),
+      charUsageResetApplied: { userId, resetAt: latest },
+    });
+  } catch (error) {
+    console.error('Error checking usage resets:', error);
+  }
+}
+
 // Get character usage for current month
 async function getCharacterUsage(): Promise<{ used: number; limit: number; monthKey: string }> {
   const monthKey = getCurrentMonthKey();
+  await applyPendingUsageReset();
   const result = await chrome.storage.local.get(['charUsage', 'charUsageMonth']);
 
   // Reset if it's a new month
